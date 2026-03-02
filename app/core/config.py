@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
 
+    # Server
+    port: int = 8000
+
     # Rate Limiting
     rate_limit_per_minute: int = 30
 
