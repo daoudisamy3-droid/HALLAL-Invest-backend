@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     alpha_vantage_api_key: str = ""
 
     # CORS
-    cors_origins: str = "http://localhost:3000,http://localhost:5173"
+    cors_origins: str = "http://localhost:3000,http://localhost:5173,https://hallal-invest-frontend-production.up.railway.app"
 
     # Server
     port: int = 8000
