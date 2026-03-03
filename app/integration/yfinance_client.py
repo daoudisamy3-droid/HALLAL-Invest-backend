@@ -1,8 +1,8 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-import requests # Nécessaire pour la session
 
+import requests
 import yfinance as yf
 import pandas as pd
 
@@ -16,6 +16,7 @@ custom_session.headers.update({
 
 _executor = ThreadPoolExecutor(max_workers=4)
 
+
 def _fetch_ticker_info(symbol: str) -> dict[str, Any]:
     """Blocking call — run in executor."""
     # Utilisation de la session pour "masquer" le serveur Railway
@@ -26,6 +27,7 @@ def _fetch_ticker_info(symbol: str) -> dict[str, Any]:
         raise ValueError(f"No data found for symbol: {symbol}")
     return info
 
+
 def _fetch_history(symbol: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
     """Blocking call — run in executor."""
     ticker = yf.Ticker(symbol, session=custom_session)
@@ -33,6 +35,7 @@ def _fetch_history(symbol: str, period: str = "5y", interval: str = "1d") -> pd.
     if df.empty:
         raise ValueError(f"No historical data for {symbol} ({period}/{interval})")
     return df
+
 
 def _fetch_financials(symbol: str) -> dict[str, Any]:
     """Fetch income statement, balance sheet, and cash flow."""
@@ -43,15 +46,18 @@ def _fetch_financials(symbol: str) -> dict[str, Any]:
         "cashflow": ticker.cashflow,
     }
 
+
 async def get_ticker_info(symbol: str) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
     logger.info("Fetching ticker info for %s", symbol)
     return await loop.run_in_executor(_executor, _fetch_ticker_info, symbol)
 
+
 async def get_history(symbol: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
     loop = asyncio.get_running_loop()
     logger.info("Fetching %s history for %s", period, symbol)
     return await loop.run_in_executor(_executor, _fetch_history, symbol, period, interval)
+
 
 async def get_financials(symbol: str) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
