@@ -1,6 +1,11 @@
+import json
 from typing import Any, Optional
 
+import pandas as pd
+
 from app.core.logging import logger
+from app.integration.anthropic_client import analyze_with_claude
+from app.integration.yfinance_client import get_financials
 from app.models.schemas import ShariahScreening, ShariahLevel, ShariahRatio
 
 
@@ -91,7 +96,68 @@ def _compute_level(
     return ShariahLevel(level_name=level_name, passed=passed, ratios=ratios)
 
 
-def screen(info: dict[str, Any]) -> ShariahScreening:
+def _income_stmt_to_text(income_stmt: pd.DataFrame) -> str:
+    """Convert yfinance income statement DataFrame to a readable string for AI analysis."""
+    if income_stmt is None or income_stmt.empty:
+        return ""
+    # Take the most recent column (latest fiscal year)
+    latest = income_stmt.iloc[:, 0]
+    lines = [f"  {row}: {val}" for row, val in latest.items() if pd.notna(val)]
+    return "\n".join(lines)
+
+
+async def _ai_extract_impure_revenue(symbol: str, total_revenue: Optional[float]) -> Optional[float]:
+    """Use Claude to analyse the full income statement and extract impure revenue."""
+    try:
+        financials = await get_financials(symbol)
+        income_stmt = financials.get("income_stmt")
+        if income_stmt is None or income_stmt.empty:
+            logger.warning("No income statement available for %s, cannot run AI extraction", symbol)
+            return None
+
+        stmt_text = _income_stmt_to_text(income_stmt)
+        if not stmt_text:
+            return None
+
+        prompt = (
+            f"Analyse the following income statement for {symbol} and extract the total "
+            f"amount of impure (haram) revenue. Impure revenue includes:\n"
+            f"- Interest income / Interest earned\n"
+            f"- Gains from speculative trading\n"
+            f"- Revenue from alcohol, tobacco, gambling, weapons, or adult entertainment\n"
+            f"- Any other non-Shariah-compliant income\n\n"
+            f"Income Statement (most recent fiscal year):\n{stmt_text}\n\n"
+            f"Total Revenue reported: {total_revenue}\n\n"
+            f"Return ONLY a JSON object with these fields:\n"
+            f'{{"impure_revenue": <number or 0 if none found>, '
+            f'"sources": [<list of line items considered impure>], '
+            f'"confidence": "<high|medium|low>"}}\n'
+        )
+
+        raw = await analyze_with_claude(prompt)
+        logger.info("AI impure revenue extraction for %s: %s", symbol, raw[:200])
+
+        data = json.loads(raw)
+        impure = data.get("impure_revenue")
+        confidence = data.get("confidence", "low")
+        sources = data.get("sources", [])
+
+        if impure is not None and isinstance(impure, (int, float)) and impure >= 0:
+            logger.info(
+                "AI extracted impure_revenue=%.2f for %s (confidence=%s, sources=%s)",
+                impure, symbol, confidence, sources,
+            )
+            return float(impure)
+
+        logger.warning("AI returned unusable impure_revenue for %s: %s", symbol, data)
+        return None
+
+    except Exception as exc:
+        logger.warning("AI impure revenue extraction failed for %s: %s", symbol, exc)
+        return None
+
+
+async def screen(info: dict[str, Any], symbol: str = "") -> ShariahScreening:
     """
     Double-level Shariah screening.
 
@@ -100,6 +166,8 @@ def screen(info: dict[str, Any]) -> ShariahScreening:
 
     Impure revenue is estimated as (totalRevenue - operatingRevenue) when
     a direct figure is unavailable — conservative proxy.
+    Falls back to AI analysis of the full income statement when the proxy
+    cannot be computed.
     """
     logger.info("Running Shariah screening")
 
@@ -117,8 +185,12 @@ def screen(info: dict[str, Any]) -> ShariahScreening:
     if total_revenue is not None and operating_revenue is not None and operating_revenue > 0:
         impure_revenue = max(total_revenue - operating_revenue, 0)
     else:
-        # If we can't determine, set to None so the ratio flags as unavailable
         impure_revenue = None
+
+    # Fallback: use AI to extract impure revenue from the full income statement
+    if impure_revenue is None and symbol:
+        logger.info("Structured impure_revenue unavailable for %s, attempting AI extraction", symbol)
+        impure_revenue = await _ai_extract_impure_revenue(symbol, total_revenue)
 
     # AAOIFI Level — denominator: Market Cap
     aaoifi = _compute_level(

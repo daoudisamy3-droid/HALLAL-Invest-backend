@@ -54,7 +54,7 @@ async def get_ticker(symbol: str) -> TickerResponse:
         from app.models.schemas import Technicals
         technicals = Technicals(current_price=float(history["Close"].iloc[-1]))
 
-    shariah = shariah_screen(info)
+    shariah = await shariah_screen(info, symbol)
 
     # ── Phase 3: AI Analysis (non-blocking, graceful degradation) ─
     ai_verdict = None
