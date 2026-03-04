@@ -18,56 +18,57 @@ def _build_prompt(
     technicals: Technicals,
     shariah: ShariahScreening,
 ) -> str:
-    return f"""Analyze the following equity data for **{symbol}** and return your analysis as a JSON object.
+    return f"""Analyse les données suivantes pour l'action **{symbol}** et renvoie ton analyse sous forme d'objet JSON.
+Rédige INTÉGRALEMENT en français. Garde uniquement les acronymes et termes techniques boursiers courants en anglais (P/E, PEG, ROE, ROA, RSI, SMA, Cash Flow, EBITDA, etc.).
 
-## Fundamentals
-- Name: {fundamentals.name}
-- Sector: {fundamentals.sector} | Industry: {fundamentals.industry}
-- Market Cap: {fundamentals.market_cap}
-- P/E: {fundamentals.pe_ratio} | PEG: {fundamentals.peg_ratio}
-- ROE: {fundamentals.roe}% | ROA: {fundamentals.roa}%
-- Net Margin: {fundamentals.net_margin}% | Gross Margin: {fundamentals.gross_margin}%
-- FCF Margin: {fundamentals.fcf_margin}%
-- Debt/Equity: {fundamentals.debt_to_equity}
-- 3Y Revenue CAGR: {fundamentals.revenue_cagr_3y}%
+## Fondamentaux
+- Nom : {fundamentals.name}
+- Secteur : {fundamentals.sector} | Industrie : {fundamentals.industry}
+- Capitalisation boursière : {fundamentals.market_cap}
+- P/E : {fundamentals.pe_ratio} | PEG : {fundamentals.peg_ratio}
+- ROE : {fundamentals.roe}% | ROA : {fundamentals.roa}%
+- Marge nette : {fundamentals.net_margin}% | Marge brute : {fundamentals.gross_margin}%
+- Marge FCF : {fundamentals.fcf_margin}%
+- Debt/Equity : {fundamentals.debt_to_equity}
+- CAGR Revenus 3 ans : {fundamentals.revenue_cagr_3y}%
 
-## Technicals
-- Current Price: {technicals.current_price}
-- RSI (14d): {technicals.rsi_14}
-- SMA 50: {technicals.sma_50} | SMA 200: {technicals.sma_200}
-- Bollinger Bands: Upper={technicals.bollinger_bands.upper if technicals.bollinger_bands else None}, Mid={technicals.bollinger_bands.middle if technicals.bollinger_bands else None}, Lower={technicals.bollinger_bands.lower if technicals.bollinger_bands else None}
-- Max Drawdown (5Y): {technicals.max_drawdown_5y}%
+## Analyse technique
+- Cours actuel : {technicals.current_price}
+- RSI (14j) : {technicals.rsi_14}
+- SMA 50 : {technicals.sma_50} | SMA 200 : {technicals.sma_200}
+- Bandes de Bollinger : Haute={technicals.bollinger_bands.upper if technicals.bollinger_bands else None}, Médiane={technicals.bollinger_bands.middle if technicals.bollinger_bands else None}, Basse={technicals.bollinger_bands.lower if technicals.bollinger_bands else None}
+- Drawdown max (5 ans) : {technicals.max_drawdown_5y}%
 
-## Shariah Screening
-- Halal Badge: {shariah.halal_badge}
-- AAOIFI Level: {"PASS" if shariah.aaoifi.passed else "FAIL"}
-- Strict Level: {"PASS" if shariah.strict.passed else "FAIL"}
-- Summary: {shariah.summary}
-- AAOIFI Ratios: {json.dumps([r.model_dump() for r in shariah.aaoifi.ratios], default=str)}
-- Strict Ratios: {json.dumps([r.model_dump() for r in shariah.strict.ratios], default=str)}
+## Screening Shariah
+- Badge Halal : {shariah.halal_badge}
+- Niveau AAOIFI : {"PASS" if shariah.aaoifi.passed else "FAIL"}
+- Niveau Strict : {"PASS" if shariah.strict.passed else "FAIL"}
+- Résumé : {shariah.summary}
+- Ratios AAOIFI : {json.dumps([r.model_dump() for r in shariah.aaoifi.ratios], default=str)}
+- Ratios Strict : {json.dumps([r.model_dump() for r in shariah.strict.ratios], default=str)}
 
-## Required JSON Output Format
-Return ONLY a valid JSON object with exactly this structure:
+## Format JSON attendu
+Renvoie UNIQUEMENT un objet JSON valide avec exactement cette structure (les summary et details DOIVENT être rédigés en français) :
 {{
   "shariah_compliance": {{
     "rating": "COMPLIANT" | "DOUBTFUL" | "NON-COMPLIANT",
-    "summary": "one-paragraph assessment",
-    "details": ["point 1", "point 2"]
+    "summary": "un paragraphe d'évaluation en français",
+    "details": ["point 1 en français", "point 2 en français"]
   }},
   "company_quality": {{
     "rating": "EXCELLENT" | "GOOD" | "AVERAGE" | "POOR",
-    "summary": "one-paragraph assessment",
-    "details": ["point 1", "point 2"]
+    "summary": "un paragraphe d'évaluation en français",
+    "details": ["point 1 en français", "point 2 en français"]
   }},
   "valuation": {{
     "rating": "UNDERVALUED" | "FAIR" | "OVERVALUED",
-    "summary": "one-paragraph assessment",
-    "details": ["point 1", "point 2"]
+    "summary": "un paragraphe d'évaluation en français",
+    "details": ["point 1 en français", "point 2 en français"]
   }},
   "entry_timing": {{
     "rating": "FAVORABLE" | "NEUTRAL" | "UNFAVORABLE",
-    "summary": "one-paragraph assessment",
-    "details": ["point 1", "point 2"]
+    "summary": "un paragraphe d'évaluation en français",
+    "details": ["point 1 en français", "point 2 en français"]
   }},
   "final_verdict": "BUY" | "WAIT" | "AVOID",
   "entry_zone": {{ "low": <float>, "high": <float> }},
