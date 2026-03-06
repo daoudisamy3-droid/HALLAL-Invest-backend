@@ -87,6 +87,14 @@ class AIVerdict(BaseModel):
     raw_response: Optional[str] = Field(None, description="Raw Claude JSON if parsing fails")
 
 
+# ── Lightweight Price ─────────────────────────────────────────────
+
+class PriceResponse(BaseModel):
+    current_price: float
+    change: float
+    change_pct: float
+
+
 # ── Aggregated Ticker Response ────────────────────────────────────
 
 class TickerResponse(BaseModel):

@@ -8,9 +8,33 @@ from app.integration import yfinance_client
 from app.services.financial_engine import compute_fundamentals, compute_technicals
 from app.services.shariah_screening import screen as shariah_screen
 from app.services.ai_analysis import get_ai_verdict
-from app.models.schemas import TickerResponse
+from app.models.schemas import TickerResponse, PriceResponse
 
 router = APIRouter()
+
+
+@router.get(
+    "/ticker/{symbol}/price",
+    response_model=PriceResponse,
+    summary="Lightweight price snapshot",
+    description="Returns current price, change, and change percentage. No AI, no Shariah, no technicals.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def get_ticker_price(symbol: str) -> PriceResponse:
+    symbol = symbol.upper().strip()
+    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+
+    try:
+        data = await yfinance_client.get_fast_price(symbol)
+    except Exception as exc:
+        logger.error("Price fetch failed for %s: %s", symbol, exc)
+        raise HTTPException(
+            status_code=404,
+            detail=f"Could not fetch price for '{symbol}'. Verify the symbol is correct.",
+        )
+
+    return PriceResponse(**data)
 
 
 @router.get(
