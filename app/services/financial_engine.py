@@ -25,6 +25,21 @@ def _pct(val: Optional[float]) -> Optional[float]:
     return round(val * 100, 2)
 
 
+def _extract_domain(url: Optional[str]) -> Optional[str]:
+    """Return the bare domain from a full URL (e.g. 'https://www.apple.com/fr' → 'apple.com')."""
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+        # Strip leading 'www.'
+        if host.startswith("www."):
+            host = host[4:]
+        return host or None
+    except Exception:
+        return None
+
+
 def compute_fundamentals(info: dict[str, Any]) -> Fundamentals:
     logger.info("Computing fundamentals for %s", info.get("symbol", "?"))
 
@@ -62,6 +77,7 @@ def compute_fundamentals(info: dict[str, Any]) -> Fundamentals:
         sector=info.get("sector"),
         industry=info.get("industry"),
         name=info.get("longName") or info.get("shortName"),
+        website=_extract_domain(info.get("website")),
     )
 
 

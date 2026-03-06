@@ -42,6 +42,7 @@ class Fundamentals(BaseModel):
     sector: Optional[str] = None
     industry: Optional[str] = None
     name: Optional[str] = None
+    website: Optional[str] = None
 
 
 # ── Technicals ────────────────────────────────────────────────────
