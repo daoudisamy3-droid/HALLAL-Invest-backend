@@ -2,50 +2,51 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 
-# ── Shariah Screening ─────────────────────────────────────────────
+# ── Shariah Screening (pure ratio-based, no AI) ──────────────────
 
 class ShariahRatio(BaseModel):
     name: str
     value: Optional[float] = None
     threshold: float
-    passed: bool
+    passed: Optional[bool] = None
     detail: str
 
 
 class ShariahLevel(BaseModel):
     level_name: str = Field(description="AAOIFI or Strict")
-    passed: bool
+    passed: Optional[bool] = None
     ratios: list[ShariahRatio]
 
 
 class ShariahScreening(BaseModel):
-    halal_badge: str = Field(description="PASS, FAIL, or DOUBTFUL")
+    halal_badge: str = Field(description="PASS, FAIL, DOUBTFUL, or INCONCLUSIVE")
     aaoifi: ShariahLevel
     strict: ShariahLevel
     summary: str
 
 
-# ── Fundamentals ──────────────────────────────────────────────────
+# ── Fundamentals (raw native fields from yfinance) ───────────────
 
 class Fundamentals(BaseModel):
-    market_cap: Optional[float] = None
-    pe_ratio: Optional[float] = None
-    peg_ratio: Optional[float] = None
-    roe: Optional[float] = None
-    roa: Optional[float] = None
-    net_margin: Optional[float] = None
-    gross_margin: Optional[float] = None
-    fcf_margin: Optional[float] = None
-    debt_to_equity: Optional[float] = None
-    revenue_cagr_3y: Optional[float] = None
-    currency: Optional[str] = None
+    name: Optional[str] = None
     sector: Optional[str] = None
     industry: Optional[str] = None
-    name: Optional[str] = None
+    currency: Optional[str] = None
     website: Optional[str] = None
+    market_cap: Optional[float] = None
+    trailing_pe: Optional[float] = None
+    forward_pe: Optional[float] = None
+    peg_ratio: Optional[float] = None
+    dividend_yield: Optional[float] = None
+    return_on_equity: Optional[float] = None
+    gross_margins: Optional[float] = None
+    debt_to_equity: Optional[float] = None
+    total_debt: Optional[float] = None
+    total_revenue: Optional[float] = None
+    free_cashflow: Optional[float] = None
 
 
-# ── Technicals ────────────────────────────────────────────────────
+# ── Technicals (computed from raw OHLC data, no AI) ──────────────
 
 class BollingerBands(BaseModel):
     upper: Optional[float] = None
@@ -62,7 +63,7 @@ class Technicals(BaseModel):
     max_drawdown_5y: Optional[float] = None
 
 
-# ── AI Analysis ───────────────────────────────────────────────────
+# ── AI Commentary (read-only analysis, never modifies data) ──────
 
 class AISection(BaseModel):
     rating: Optional[str] = None
@@ -75,7 +76,7 @@ class EntryZone(BaseModel):
     high: Optional[float] = None
 
 
-class AIVerdict(BaseModel):
+class AICommentary(BaseModel):
     shariah_compliance: Optional[AISection] = None
     company_quality: Optional[AISection] = None
     valuation: Optional[AISection] = None
@@ -102,5 +103,5 @@ class TickerResponse(BaseModel):
     fundamentals: Fundamentals
     technicals: Technicals
     shariah: ShariahScreening
-    ai_verdict: Optional[AIVerdict] = None
+    ai_commentary: Optional[AICommentary] = None
     errors: list[str] = Field(default_factory=list, description="Non-fatal warnings")

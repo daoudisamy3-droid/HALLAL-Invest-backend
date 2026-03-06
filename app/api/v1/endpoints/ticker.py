@@ -5,10 +5,10 @@ from fastapi import APIRouter, HTTPException, Depends
 from app.core.logging import logger
 from app.core.security import rate_limit_dependency
 from app.integration import yfinance_client
-from app.services.financial_engine import compute_fundamentals, compute_technicals
+from app.services.financial_engine import extract_fundamentals, compute_technicals
 from app.services.shariah_screening import screen as shariah_screen
-from app.services.ai_analysis import get_ai_verdict
-from app.models.schemas import TickerResponse, PriceResponse
+from app.services.ai_analysis import get_ai_commentary
+from app.models.schemas import TickerResponse, PriceResponse, Technicals
 
 router = APIRouter()
 
@@ -42,8 +42,8 @@ async def get_ticker_price(symbol: str) -> PriceResponse:
     response_model=TickerResponse,
     summary="Full ticker analysis",
     description=(
-        "Aggregates fundamentals, technicals, Shariah screening, and AI verdict "
-        "for a given stock symbol. Parallel fetches for low latency."
+        "Aggregates raw fundamentals, technicals, and Shariah screening "
+        "from financial APIs. Optional AI commentary reads but never modifies the data."
     ),
     dependencies=[Depends(rate_limit_dependency)],
 )
@@ -54,7 +54,7 @@ async def get_ticker(symbol: str) -> TickerResponse:
 
     errors: list[str] = []
 
-    # ── Phase 1: Parallel data fetching ───────────────────────────
+    # ── Phase 1: Parallel raw data fetching ───────────────────────
     try:
         info, history = await asyncio.gather(
             yfinance_client.get_ticker_info(symbol),
@@ -67,32 +67,31 @@ async def get_ticker(symbol: str) -> TickerResponse:
             detail=f"Could not fetch data for '{symbol}'. Verify the symbol is correct.",
         )
 
-    # ── Phase 2: CPU-bound computations ───────────────────────────
-    fundamentals = compute_fundamentals(info)
+    # ── Phase 2: Raw data extraction (no AI, no gap-filling) ─────
+    fundamentals = extract_fundamentals(info)
 
     try:
         technicals = compute_technicals(history)
     except Exception as exc:
         logger.warning("Technical analysis failed for %s: %s", symbol, exc)
         errors.append(f"Technical analysis partial failure: {exc}")
-        from app.models.schemas import Technicals
         technicals = Technicals(current_price=float(history["Close"].iloc[-1]))
 
-    shariah = await shariah_screen(info, symbol)
+    shariah = shariah_screen(info)
 
-    # ── Phase 3: AI Analysis (non-blocking, graceful degradation) ─
-    ai_verdict = None
+    # ── Phase 3: AI Commentary (read-only, optional, graceful) ────
+    ai_commentary = None
     try:
-        ai_verdict = await get_ai_verdict(symbol, fundamentals, technicals, shariah)
+        ai_commentary = await get_ai_commentary(symbol, fundamentals, technicals, shariah)
     except Exception as exc:
-        logger.warning("AI analysis failed for %s: %s", symbol, exc)
-        errors.append(f"AI analysis unavailable: {exc}")
+        logger.warning("AI commentary failed for %s: %s", symbol, exc)
+        errors.append(f"AI commentary unavailable: {exc}")
 
     return TickerResponse(
         symbol=symbol,
         fundamentals=fundamentals,
         technicals=technicals,
         shariah=shariah,
-        ai_verdict=ai_verdict,
+        ai_commentary=ai_commentary,
         errors=errors,
     )

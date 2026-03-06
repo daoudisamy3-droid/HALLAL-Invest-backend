@@ -1,4 +1,5 @@
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
@@ -8,7 +9,8 @@ from app.core.logging import logger
 from app.models.schemas import Fundamentals, Technicals, BollingerBands
 
 
-def _safe_get(info: dict, key: str) -> Optional[float]:
+def _safe_float(info: dict, key: str) -> Optional[float]:
+    """Extract a float from yfinance info dict. Returns None if missing or invalid."""
     val = info.get(key)
     if val is None:
         return None
@@ -18,21 +20,12 @@ def _safe_get(info: dict, key: str) -> Optional[float]:
         return None
 
 
-def _pct(val: Optional[float]) -> Optional[float]:
-    """Convert a decimal ratio to a rounded percentage."""
-    if val is None:
-        return None
-    return round(val * 100, 2)
-
-
 def _extract_domain(url: Optional[str]) -> Optional[str]:
-    """Return the bare domain from a full URL (e.g. 'https://www.apple.com/fr' → 'apple.com')."""
+    """Return the bare domain from a full URL (e.g. 'https://www.apple.com/fr' -> 'apple.com')."""
     if not url:
         return None
     try:
-        from urllib.parse import urlparse
         host = urlparse(url).hostname or ""
-        # Strip leading 'www.'
         if host.startswith("www."):
             host = host[4:]
         return host or None
@@ -40,49 +33,32 @@ def _extract_domain(url: Optional[str]) -> Optional[str]:
         return None
 
 
-def compute_fundamentals(info: dict[str, Any]) -> Fundamentals:
-    logger.info("Computing fundamentals for %s", info.get("symbol", "?"))
-
-    # 3-year Revenue CAGR
-    revenue_cagr = None
-    revenue_history = info.get("revenueHistory")
-    if revenue_history and len(revenue_history) >= 4:
-        try:
-            earliest = revenue_history[-1]
-            latest = revenue_history[0]
-            if earliest > 0 and latest > 0:
-                revenue_cagr = round(((latest / earliest) ** (1 / 3) - 1) * 100, 2)
-        except (TypeError, ZeroDivisionError):
-            pass
-
-    # FCF margin
-    fcf = _safe_get(info, "freeCashflow")
-    total_rev = _safe_get(info, "totalRevenue")
-    fcf_margin = None
-    if fcf is not None and total_rev and total_rev > 0:
-        fcf_margin = round((fcf / total_rev) * 100, 2)
+def extract_fundamentals(info: dict[str, Any]) -> Fundamentals:
+    """Extract raw native fields from yfinance info dict. No derivation, no gap-filling."""
+    logger.info("Extracting fundamentals for %s", info.get("symbol", "?"))
 
     return Fundamentals(
-        market_cap=_safe_get(info, "marketCap"),
-        pe_ratio=_safe_get(info, "trailingPE"),
-        peg_ratio=_safe_get(info, "pegRatio"),
-        roe=_pct(_safe_get(info, "returnOnEquity")),
-        roa=_pct(_safe_get(info, "returnOnAssets")),
-        net_margin=_pct(_safe_get(info, "profitMargins")),
-        gross_margin=_pct(_safe_get(info, "grossMargins")),
-        fcf_margin=fcf_margin,
-        debt_to_equity=_safe_get(info, "debtToEquity"),
-        revenue_cagr_3y=revenue_cagr,
-        currency=info.get("currency"),
+        name=info.get("longName") or info.get("shortName"),
         sector=info.get("sector"),
         industry=info.get("industry"),
-        name=info.get("longName") or info.get("shortName"),
+        currency=info.get("currency"),
         website=_extract_domain(info.get("website")),
+        market_cap=_safe_float(info, "marketCap"),
+        trailing_pe=_safe_float(info, "trailingPE"),
+        forward_pe=_safe_float(info, "forwardPE"),
+        peg_ratio=_safe_float(info, "pegRatio"),
+        dividend_yield=_safe_float(info, "dividendYield"),
+        return_on_equity=_safe_float(info, "returnOnEquity"),
+        gross_margins=_safe_float(info, "grossMargins"),
+        debt_to_equity=_safe_float(info, "debtToEquity"),
+        total_debt=_safe_float(info, "totalDebt"),
+        total_revenue=_safe_float(info, "totalRevenue"),
+        free_cashflow=_safe_float(info, "freeCashflow"),
     )
 
 
 def compute_technicals(df: pd.DataFrame) -> Technicals:
-    """Calculate RSI-14, SMA 50/200, Bollinger Bands, and Max Drawdown from OHLC data."""
+    """Calculate RSI-14, SMA 50/200, Bollinger Bands, and Max Drawdown from raw OHLC data."""
     logger.info("Computing technicals (%d bars)", len(df))
 
     close = df["Close"]

@@ -1,4 +1,5 @@
 import json
+import re
 
 from app.core.logging import logger
 from app.integration.anthropic_client import analyze_with_claude
@@ -6,7 +7,7 @@ from app.models.schemas import (
     Fundamentals,
     Technicals,
     ShariahScreening,
-    AIVerdict,
+    AICommentary,
     AISection,
     EntryZone,
 )
@@ -18,57 +19,67 @@ def _build_prompt(
     technicals: Technicals,
     shariah: ShariahScreening,
 ) -> str:
-    return f"""Analyse les données suivantes pour l'action **{symbol}** et renvoie ton analyse sous forme d'objet JSON.
-Rédige INTÉGRALEMENT en français. Garde uniquement les acronymes et termes techniques boursiers courants en anglais (P/E, PEG, ROE, ROA, RSI, SMA, Cash Flow, EBITDA, etc.).
+    return f"""Voici les données BRUTES extraites des API financières pour l'action **{symbol}**.
+Tu dois UNIQUEMENT commenter et analyser ces chiffres. Tu ne dois JAMAIS inventer, estimer ou modifier un chiffre.
+Si une donnée est null/None, indique explicitement « donnée non disponible » — ne la remplace pas.
 
-## Fondamentaux
+Rédige INTÉGRALEMENT en français. Conserve les acronymes techniques en anglais (P/E, PEG, ROE, RSI, SMA, etc.).
+
+## Fondamentaux (données brutes yfinance)
 - Nom : {fundamentals.name}
 - Secteur : {fundamentals.sector} | Industrie : {fundamentals.industry}
 - Capitalisation boursière : {fundamentals.market_cap}
-- P/E : {fundamentals.pe_ratio} | PEG : {fundamentals.peg_ratio}
-- ROE : {fundamentals.roe}% | ROA : {fundamentals.roa}%
-- Marge nette : {fundamentals.net_margin}% | Marge brute : {fundamentals.gross_margin}%
-- Marge FCF : {fundamentals.fcf_margin}%
+- P/E (trailing) : {fundamentals.trailing_pe} | P/E (forward) : {fundamentals.forward_pe}
+- PEG : {fundamentals.peg_ratio}
+- Dividend Yield : {fundamentals.dividend_yield}
+- ROE : {fundamentals.return_on_equity}
+- Gross Margins : {fundamentals.gross_margins}
 - Debt/Equity : {fundamentals.debt_to_equity}
-- CAGR Revenus 3 ans : {fundamentals.revenue_cagr_3y}%
+- Total Debt : {fundamentals.total_debt}
+- Total Revenue : {fundamentals.total_revenue}
+- Free Cash Flow : {fundamentals.free_cashflow}
 
-## Analyse technique
+## Analyse technique (calculée à partir de données OHLC brutes)
 - Cours actuel : {technicals.current_price}
 - RSI (14j) : {technicals.rsi_14}
 - SMA 50 : {technicals.sma_50} | SMA 200 : {technicals.sma_200}
 - Bandes de Bollinger : Haute={technicals.bollinger_bands.upper if technicals.bollinger_bands else None}, Médiane={technicals.bollinger_bands.middle if technicals.bollinger_bands else None}, Basse={technicals.bollinger_bands.lower if technicals.bollinger_bands else None}
 - Drawdown max (5 ans) : {technicals.max_drawdown_5y}%
 
-## Screening Shariah
-- Badge Halal : {shariah.halal_badge}
-- Niveau AAOIFI : {"PASS" if shariah.aaoifi.passed else "FAIL"}
-- Niveau Strict : {"PASS" if shariah.strict.passed else "FAIL"}
+## Screening Shariah (ratios calculés à partir des données brutes)
+- Badge : {shariah.halal_badge}
+- AAOIFI : {shariah.aaoifi.passed} | Strict : {shariah.strict.passed}
 - Résumé : {shariah.summary}
 - Ratios AAOIFI : {json.dumps([r.model_dump() for r in shariah.aaoifi.ratios], default=str)}
 - Ratios Strict : {json.dumps([r.model_dump() for r in shariah.strict.ratios], default=str)}
 
+## RÈGLES STRICTES
+1. Ne modifie AUCUN chiffre ci-dessus dans ton analyse.
+2. Si une donnée est None/null, écris « N/A » — ne l'estime jamais.
+3. Base ton commentaire EXCLUSIVEMENT sur les données fournies.
+
 ## Format JSON attendu
-Renvoie UNIQUEMENT un objet JSON valide avec exactement cette structure (les summary et details DOIVENT être rédigés en français) :
+Renvoie UNIQUEMENT un objet JSON valide :
 {{
   "shariah_compliance": {{
-    "rating": "COMPLIANT" | "DOUBTFUL" | "NON-COMPLIANT",
-    "summary": "un paragraphe d'évaluation en français",
-    "details": ["point 1 en français", "point 2 en français"]
+    "rating": "COMPLIANT" | "DOUBTFUL" | "NON-COMPLIANT" | "INCONCLUSIVE",
+    "summary": "commentaire en français basé sur les ratios ci-dessus",
+    "details": ["point 1", "point 2"]
   }},
   "company_quality": {{
     "rating": "EXCELLENT" | "GOOD" | "AVERAGE" | "POOR",
-    "summary": "un paragraphe d'évaluation en français",
-    "details": ["point 1 en français", "point 2 en français"]
+    "summary": "commentaire en français",
+    "details": ["point 1", "point 2"]
   }},
   "valuation": {{
     "rating": "UNDERVALUED" | "FAIR" | "OVERVALUED",
-    "summary": "un paragraphe d'évaluation en français",
-    "details": ["point 1 en français", "point 2 en français"]
+    "summary": "commentaire en français",
+    "details": ["point 1", "point 2"]
   }},
   "entry_timing": {{
     "rating": "FAVORABLE" | "NEUTRAL" | "UNFAVORABLE",
-    "summary": "un paragraphe d'évaluation en français",
-    "details": ["point 1 en français", "point 2 en français"]
+    "summary": "commentaire en français",
+    "details": ["point 1", "point 2"]
   }},
   "final_verdict": "BUY" | "WAIT" | "AVOID",
   "entry_zone": {{ "low": <float>, "high": <float> }},
@@ -78,23 +89,21 @@ Renvoie UNIQUEMENT un objet JSON valide avec exactement cette structure (les sum
 """
 
 
-def _parse_verdict(raw: str) -> AIVerdict:
+def _parse_commentary(raw: str) -> AICommentary:
     """Best-effort parse of Claude's JSON response into our schema."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        # Try to extract JSON from markdown fences
-        import re
         match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
         if match:
             try:
                 data = json.loads(match.group(1))
             except json.JSONDecodeError:
                 logger.warning("Could not parse AI response as JSON")
-                return AIVerdict(raw_response=raw)
+                return AICommentary(raw_response=raw)
         else:
             logger.warning("Could not parse AI response as JSON")
-            return AIVerdict(raw_response=raw)
+            return AICommentary(raw_response=raw)
 
     def _parse_section(key: str) -> AISection | None:
         section = data.get(key)
@@ -111,7 +120,7 @@ def _parse_verdict(raw: str) -> AIVerdict:
     if isinstance(ez, dict):
         entry_zone = EntryZone(low=ez.get("low"), high=ez.get("high"))
 
-    return AIVerdict(
+    return AICommentary(
         shariah_compliance=_parse_section("shariah_compliance"),
         company_quality=_parse_section("company_quality"),
         valuation=_parse_section("valuation"),
@@ -123,16 +132,16 @@ def _parse_verdict(raw: str) -> AIVerdict:
     )
 
 
-async def get_ai_verdict(
+async def get_ai_commentary(
     symbol: str,
     fundamentals: Fundamentals,
     technicals: Technicals,
     shariah: ShariahScreening,
-) -> AIVerdict:
+) -> AICommentary:
     prompt = _build_prompt(symbol, fundamentals, technicals, shariah)
-    logger.info("Requesting AI analysis for %s", symbol)
+    logger.info("Requesting AI commentary for %s", symbol)
 
     raw = await analyze_with_claude(prompt)
-    logger.info("Received AI response for %s (%d chars)", symbol, len(raw))
+    logger.info("Received AI commentary for %s (%d chars)", symbol, len(raw))
 
-    return _parse_verdict(raw)
+    return _parse_commentary(raw)
