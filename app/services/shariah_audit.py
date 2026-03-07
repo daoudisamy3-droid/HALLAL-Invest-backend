@@ -10,6 +10,7 @@ Sources:
   - Musaffa (fallback): revenue segmentation for haram segment detection
 """
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -144,6 +145,14 @@ async def _financial_screening(symbol: str, avg_mkt_cap: Optional[float]) -> tup
     stmt = bs[0]
     bs_date = stmt.get("date")
 
+    logger.info(
+        "FMP balance sheet for %s (date=%s): shortTermDebt=%s, longTermDebt=%s, "
+        "shortTermInvestments=%s, longTermInvestments=%s",
+        symbol, bs_date,
+        stmt.get("shortTermDebt"), stmt.get("longTermDebt"),
+        stmt.get("shortTermInvestments"), stmt.get("longTermInvestments"),
+    )
+
     short_debt = _safe(stmt.get("shortTermDebt")) or 0
     long_debt = _safe(stmt.get("longTermDebt")) or 0
     total_debt = short_debt + long_debt
@@ -180,6 +189,10 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
     inc = await get_income_statement(symbol, limit=1)
     if inc:
         stmt = inc[0]
+        logger.info(
+            "FMP income statement for %s (date=%s): interestIncome=%s, revenue=%s",
+            symbol, stmt.get("date"), stmt.get("interestIncome"), stmt.get("revenue"),
+        )
         interest_income = _safe(stmt.get("interestIncome")) or 0
         interest_source = "FMP"
         total_revenue = _safe(stmt.get("revenue"))
@@ -318,7 +331,6 @@ async def run_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     avg_mkt_cap = await _compute_avg_market_cap_36m(symbol, info)
 
     # Step 2: financial screening (parallel with step 3)
-    import asyncio
     fin_task = _financial_screening(symbol, avg_mkt_cap)
     rev_task = _revenue_screening(symbol)
     (fin_screening, bs_date), (rev_screening, flags) = await asyncio.gather(fin_task, rev_task)
