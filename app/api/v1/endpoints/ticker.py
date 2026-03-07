@@ -12,12 +12,14 @@ from app.integration import yfinance_client
 from app.models.schemas import (
     DataGeneral, Metric, PriceResponse, AAOIFIAudit,
     AnalystSentiment, RecommendationBreakdown,
+    StrategicAnalysis,
 )
 
 router = APIRouter()
 
-# ── 24h in-memory cache for AAOIFI audits ────────────────────────
+# ── 24h in-memory caches ──────────────────────────────────────────
 _audit_cache: dict[str, tuple[float, AAOIFIAudit]] = {}
+_strategic_cache: dict[str, tuple[float, StrategicAnalysis]] = {}
 _CACHE_TTL = 86400  # 24 hours
 
 
@@ -170,6 +172,47 @@ async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     # Store in cache
     _audit_cache[symbol] = (now, result)
     logger.info("AAOIFI audit cached for %s (TTL=24h)", symbol)
+
+    return result
+
+
+@router.get(
+    "/ticker/{symbol}/strategic-analysis",
+    response_model=StrategicAnalysis,
+    summary="Strategic Analysis (INFOS tab)",
+    description=(
+        "Data aggregator (FMP profile, product/geo segmentation, market data) "
+        "combined with LLM synthesis: Identité Flash (3 phrases), "
+        "Moat Score (4 pillars, 1-5), and SWOT (2+/2-). "
+        "Results cached 24h to minimize LLM token consumption."
+    ),
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def get_strategic_analysis(symbol: str) -> StrategicAnalysis:
+    symbol = symbol.upper().strip()
+    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+
+    # Check cache — avoid burning LLM tokens on refresh
+    now = time.time()
+    if symbol in _strategic_cache:
+        cached_at, cached_result = _strategic_cache[symbol]
+        if now - cached_at < _CACHE_TTL:
+            logger.info("Strategic analysis cache hit for %s", symbol)
+            return cached_result
+
+    from app.services.strategic_analysis import run_strategic_analysis
+    try:
+        result = await run_strategic_analysis(symbol)
+    except Exception as exc:
+        logger.error("Strategic analysis failed for %s: %s", symbol, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Strategic analysis failed for '{symbol}': {exc}",
+        )
+
+    _strategic_cache[symbol] = (now, result)
+    logger.info("Strategic analysis cached for %s (TTL=24h)", symbol)
 
     return result
 

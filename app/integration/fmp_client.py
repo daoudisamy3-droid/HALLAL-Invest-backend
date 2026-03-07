@@ -121,6 +121,33 @@ async def get_income_statement(symbol: str, limit: int = 1) -> Optional[list[dic
     return data
 
 
+async def get_company_profile(symbol: str) -> Optional[dict]:
+    """Fetch company profile (description, sector, industry, CEO, etc.) from FMP."""
+    symbol = _normalize_symbol(symbol)
+    data = await _fmp_get(f"profile/{symbol}")
+    if not data or not isinstance(data, list) or len(data) == 0:
+        logger.warning("FMP company profile returned nothing for %s", symbol)
+        return None
+    logger.info("FMP company profile OK for %s", symbol)
+    return data[0]
+
+
+async def get_revenue_geo_segmentation(symbol: str) -> Optional[dict]:
+    """Fetch geographic revenue segmentation from FMP."""
+    symbol = _normalize_symbol(symbol)
+    data = await _fmp_get(f"revenue-geographic-segmentation/{symbol}", {"structure": "flat"})
+    if not data or not isinstance(data, list) or len(data) == 0:
+        return None
+    first = data[0]
+    if isinstance(first, dict):
+        for _key, val in first.items():
+            if isinstance(val, dict):
+                logger.info("FMP geo segmentation: %d regions for %s", len(val), symbol)
+                return val
+        return first
+    return None
+
+
 async def get_revenue_segmentation(symbol: str) -> Optional[dict]:
     """Fetch product revenue segmentation from FMP. Returns None on 403."""
     symbol = _normalize_symbol(symbol)

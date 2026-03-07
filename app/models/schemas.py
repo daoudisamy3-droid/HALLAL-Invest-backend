@@ -127,6 +127,50 @@ class AnalystSentiment(BaseModel):
     source: str = "yfinance"
 
 
+class MoatPillar(BaseModel):
+    """Single moat dimension scored 1-5."""
+    name: str
+    score: int
+    comment: str
+
+
+class SWOTItem(BaseModel):
+    """Single SWOT bullet point."""
+    label: str
+    detail: str
+
+
+class SWOT(BaseModel):
+    """SWOT analysis: exactly 2 strengths, 2 weaknesses."""
+    strengths: list[SWOTItem] = []
+    weaknesses: list[SWOTItem] = []
+
+
+class StrategicAnalysis(BaseModel):
+    """Moteur d'analyse stratégique pour l'onglet INFOS."""
+    symbol: str
+    company_name: Optional[str] = None
+
+    # Data Aggregator sources
+    business_description: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    country: Optional[str] = None
+    market_cap_display: str = "N/A"
+    product_segments: dict[str, float] = {}
+    geo_segments: dict[str, float] = {}
+
+    # LLM-generated analysis
+    identity_flash: Optional[str] = None
+    moat_pillars: list[MoatPillar] = []
+    moat_average: Optional[float] = None
+    swot: SWOT = SWOT()
+
+    flags: list[str] = []
+    source: str = "FMP+LLM"
+    cached_at: Optional[str] = None
+
+
 class AAOIFIAudit(BaseModel):
     """Complete AAOIFI audit response."""
     symbol: str
