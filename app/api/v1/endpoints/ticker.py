@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -8,9 +9,13 @@ from fastapi import APIRouter, HTTPException, Depends
 from app.core.logging import logger
 from app.core.security import rate_limit_dependency
 from app.integration import yfinance_client
-from app.models.schemas import DataGeneral, Metric, PriceResponse
+from app.models.schemas import DataGeneral, Metric, PriceResponse, AAOIFIAudit
 
 router = APIRouter()
+
+# ── 24h in-memory cache for AAOIFI audits ────────────────────────
+_audit_cache: dict[str, tuple[float, AAOIFIAudit]] = {}
+_CACHE_TTL = 86400  # 24 hours
 
 
 # ── Formatting helpers ────────────────────────────────────────────
@@ -122,6 +127,48 @@ async def get_ticker_price(symbol: str) -> PriceResponse:
         )
 
     return PriceResponse(**data)
+
+
+@router.get(
+    "/ticker/{symbol}/aaoifi-audit",
+    response_model=AAOIFIAudit,
+    summary="AAOIFI Shariah Audit",
+    description=(
+        "Deterministic AAOIFI audit: financial screening (30% thresholds) "
+        "and revenue screening (5% threshold) with Musaffa fallback. "
+        "Results cached 24h to respect FMP rate limits."
+    ),
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
+    symbol = symbol.upper().strip()
+    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+
+    # Check cache
+    now = time.time()
+    if symbol in _audit_cache:
+        cached_at, cached_result = _audit_cache[symbol]
+        if now - cached_at < _CACHE_TTL:
+            logger.info("AAOIFI audit cache hit for %s", symbol)
+            return cached_result
+
+    # Run audit
+    from app.services.shariah_audit import run_aaoifi_audit
+    try:
+        result = await run_aaoifi_audit(symbol)
+    except Exception as exc:
+        logger.error("AAOIFI audit failed for %s: %s", symbol, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"AAOIFI audit failed for '{symbol}': {exc}",
+        )
+
+    # Store in cache
+    _audit_cache[symbol] = (now, result)
+    logger.info("AAOIFI audit cached for %s (TTL=24h)", symbol)
+
+    return result
 
 
 @router.get(
