@@ -3,14 +3,10 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    app_name: str = "FinTerminal API"
-    app_version: str = "1.0.0"
+    app_name: str = "HALLAL Invest API"
+    app_version: str = "2.0.0"
     app_env: str = "development"
     log_level: str = "INFO"
-
-    # API Keys
-    anthropic_api_key: str = ""
-    alpha_vantage_api_key: str = ""
 
     # CORS
     cors_origins: str = "http://localhost:3000,http://localhost:5173,https://hallal-invest-frontend-production.up.railway.app"
@@ -20,9 +16,6 @@ class Settings(BaseSettings):
 
     # Rate Limiting
     rate_limit_per_minute: int = 30
-
-    # Claude Model
-    claude_model: str = "claude-sonnet-4-20250514"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

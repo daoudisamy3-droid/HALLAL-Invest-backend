@@ -12,10 +12,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
-        description=(
-            "FinTerminal API — Bloomberg-style financial analysis with "
-            "Shariah compliance screening and AI-powered verdicts."
-        ),
+        description="HALLAL Invest API — Stock ticker validation and price data.",
         docs_url="/docs",
         redoc_url="/redoc",
     )
