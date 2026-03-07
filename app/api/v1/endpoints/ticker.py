@@ -9,7 +9,10 @@ from fastapi import APIRouter, HTTPException, Depends
 from app.core.logging import logger
 from app.core.security import rate_limit_dependency
 from app.integration import yfinance_client
-from app.models.schemas import DataGeneral, Metric, PriceResponse, AAOIFIAudit
+from app.models.schemas import (
+    DataGeneral, Metric, PriceResponse, AAOIFIAudit,
+    AnalystSentiment, RecommendationBreakdown,
+)
 
 router = APIRouter()
 
@@ -169,6 +172,72 @@ async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     logger.info("AAOIFI audit cached for %s (TTL=24h)", symbol)
 
     return result
+
+
+@router.get(
+    "/ticker/{symbol}/analyst-sentiment",
+    response_model=AnalystSentiment,
+    summary="Analyst Sentiment & Upside",
+    description=(
+        "Returns analyst consensus (recommendationMean, recommendationKey), "
+        "target price with computed upside potential, and vote breakdown "
+        "(Strong Buy / Buy / Hold / Sell / Strong Sell). "
+        "Flags LOW_CONFIDENCE_SAMPLE when numberOfAnalystOpinions < 5."
+    ),
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def get_analyst_sentiment(symbol: str) -> AnalystSentiment:
+    symbol = symbol.upper().strip()
+    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+
+    try:
+        data = await yfinance_client.get_analyst_sentiment(symbol)
+    except Exception as exc:
+        logger.error("Analyst sentiment fetch failed for %s: %s", symbol, exc)
+        raise HTTPException(
+            status_code=404,
+            detail=f"Could not fetch analyst data for '{symbol}'. Verify the symbol is correct.",
+        )
+
+    flags: list[str] = []
+    cur_price = data.get("current_price")
+    target = data.get("target_mean_price")
+    opinions = data.get("number_of_analyst_opinions")
+
+    # Upside calculation
+    upside_pct: Optional[float] = None
+    upside_display = "N/A"
+    if cur_price and target and cur_price > 0:
+        upside_pct = round((target - cur_price) / cur_price * 100, 2)
+        sign = "+" if upside_pct >= 0 else ""
+        upside_display = f"{sign}{upside_pct}%"
+
+    # Low confidence flag
+    if opinions is not None and opinions < 5:
+        flags.append("LOW_CONFIDENCE_SAMPLE")
+
+    bd = data.get("breakdown", {})
+    breakdown = RecommendationBreakdown(
+        strong_buy=bd.get("strong_buy", 0),
+        buy=bd.get("buy", 0),
+        hold=bd.get("hold", 0),
+        sell=bd.get("sell", 0),
+        strong_sell=bd.get("strong_sell", 0),
+    )
+
+    return AnalystSentiment(
+        symbol=symbol,
+        recommendation_mean=data.get("recommendation_mean"),
+        recommendation_key=data.get("recommendation_key"),
+        target_mean_price=target,
+        current_price=cur_price,
+        upside_pct=upside_pct,
+        upside_display=upside_display,
+        number_of_analyst_opinions=opinions,
+        breakdown=breakdown,
+        flags=flags,
+    )
 
 
 @router.get(

@@ -146,3 +146,63 @@ async def get_interest_income_fallback(symbol: str) -> Optional[float]:
 
     logger.info("yfinance interest income fallback: nothing found for %s", symbol)
     return None
+
+
+def _fetch_analyst_sentiment(symbol: str) -> dict[str, Any]:
+    """
+    Fetch analyst sentiment data from a single Ticker object to minimize
+    Yahoo requests. Returns info keys + recommendations breakdown.
+    """
+    ticker = yf.Ticker(symbol)
+    info = ticker.info
+
+    if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
+        raise ValueError(f"No data found for symbol: {symbol}")
+
+    # Extract consensus fields from info
+    result: dict[str, Any] = {
+        "recommendation_mean": info.get("recommendationMean"),
+        "recommendation_key": info.get("recommendationKey"),
+        "target_mean_price": info.get("targetMeanPrice"),
+        "number_of_analyst_opinions": info.get("numberOfAnalystOpinions"),
+        "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
+        "market_cap": info.get("marketCap"),
+    }
+
+    # Fetch recommendations breakdown from the same Ticker object
+    breakdown: dict[str, int] = {
+        "strong_buy": 0, "buy": 0, "hold": 0, "sell": 0, "strong_sell": 0,
+    }
+    try:
+        recs = ticker.recommendations
+        if recs is not None and not recs.empty:
+            # yfinance returns a DataFrame; take the most recent row
+            latest = recs.iloc[-1]
+            for col in latest.index:
+                col_lower = col.lower().replace(" ", "_")
+                if col_lower in breakdown:
+                    breakdown[col_lower] = int(latest[col])
+            # Some versions use 'strongBuy'/'strongSell' column names
+            if "strongBuy" in latest.index:
+                breakdown["strong_buy"] = int(latest["strongBuy"])
+            if "strongSell" in latest.index:
+                breakdown["strong_sell"] = int(latest["strongSell"])
+    except Exception as exc:
+        logger.debug("yfinance recommendations fetch failed for %s: %s", symbol, exc)
+
+    result["breakdown"] = breakdown
+    logger.info(
+        "yfinance analyst sentiment for %s: mean=%.2f key=%s opinions=%s",
+        symbol,
+        result["recommendation_mean"] or 0,
+        result["recommendation_key"],
+        result["number_of_analyst_opinions"],
+    )
+    return result
+
+
+async def get_analyst_sentiment(symbol: str) -> dict[str, Any]:
+    """Fetch analyst sentiment — bundled info + recommendations in one call."""
+    loop = asyncio.get_running_loop()
+    logger.info("Fetching analyst sentiment for %s", symbol)
+    return await loop.run_in_executor(_executor, _fetch_analyst_sentiment, symbol)

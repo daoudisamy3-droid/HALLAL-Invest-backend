@@ -103,6 +103,30 @@ class Purification(BaseModel):
     display_value: str = "N/A"
 
 
+class RecommendationBreakdown(BaseModel):
+    """Analyst recommendation vote counts."""
+    strong_buy: int = 0
+    buy: int = 0
+    hold: int = 0
+    sell: int = 0
+    strong_sell: int = 0
+
+
+class AnalystSentiment(BaseModel):
+    """Analyst consensus and upside potential."""
+    symbol: str
+    recommendation_mean: Optional[float] = None
+    recommendation_key: Optional[str] = None
+    target_mean_price: Optional[float] = None
+    current_price: Optional[float] = None
+    upside_pct: Optional[float] = None
+    upside_display: str = "N/A"
+    number_of_analyst_opinions: Optional[int] = None
+    breakdown: RecommendationBreakdown = RecommendationBreakdown()
+    flags: list[str] = []
+    source: str = "yfinance"
+
+
 class AAOIFIAudit(BaseModel):
     """Complete AAOIFI audit response."""
     symbol: str
