@@ -3,7 +3,7 @@ Strategic Analysis Engine — Data Aggregator + LLM Synthesis.
 
 Pipeline:
   1. Aggregate data: FMP profile, product/geo segmentation, yfinance market data
-  2. Build structured prompt for Claude (PE analyst persona)
+  2. Build structured prompt for Gemini (PE analyst persona)
   3. Parse structured JSON response → StrategicAnalysis
 """
 
@@ -55,10 +55,10 @@ def _fmt_large(val: Optional[float]) -> str:
     return f"{sign}{abs_val:,.0f}"
 
 
-def _get_anthropic_key() -> str:
-    key = get_settings().anthropic_api_key
+def _get_gemini_key() -> str:
+    key = get_settings().gemini_api_key
     if not key:
-        key = os.getenv("ANTHROPIC_API_KEY", "")
+        key = os.getenv("GEMINI_API_KEY", "")
     return key
 
 
@@ -195,40 +195,57 @@ def _build_user_prompt(data: dict[str, Any]) -> str:
 
 # ── LLM Call ─────────────────────────────────────────────────────
 
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+
 async def _call_llm(user_prompt: str) -> Optional[dict]:
-    """Call Claude via Anthropic Messages API. Returns parsed JSON or None."""
-    key = _get_anthropic_key()
+    """Call Gemini via Google Generative Language API. Returns parsed JSON or None."""
+    key = _get_gemini_key()
     if not key:
-        logger.error("ANTHROPIC_API_KEY is empty — set it in Railway env vars or .env file")
+        logger.error("GEMINI_API_KEY is empty — set it in Railway env vars or .env file")
         return None
 
     payload = {
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 1024,
-        "system": SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_prompt}],
+        "systemInstruction": {
+            "parts": [{"text": SYSTEM_PROMPT}],
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": user_prompt}],
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 1024,
+            "temperature": 0.3,
+        },
     }
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
+                GEMINI_URL,
                 json=payload,
-                headers={
-                    "x-api-key": key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
+                params={"key": key},
+                headers={"content-type": "application/json"},
             )
 
         if resp.status_code != 200:
-            logger.error("Anthropic API error: status=%d body=%s", resp.status_code, resp.text[:500])
+            logger.error("Gemini API error: status=%d body=%s", resp.status_code, resp.text[:500])
             return None
 
         body = resp.json()
-        text = body["content"][0]["text"]
 
-        # Strip markdown code fences if present
+        # Gemini response: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
+        candidates = body.get("candidates", [])
+        if not candidates:
+            logger.error("Gemini returned no candidates: %s", body)
+            return None
+
+        text = candidates[0]["content"]["parts"][0]["text"]
+
+        # Strip markdown code fences if present (safety net)
         text = text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else text[3:]
@@ -236,13 +253,14 @@ async def _call_llm(user_prompt: str) -> Optional[dict]:
             text = text[:-3]
         text = text.strip()
 
+        logger.info("Gemini response parsed OK (%d chars)", len(text))
         return json.loads(text)
 
     except json.JSONDecodeError as exc:
-        logger.error("LLM returned invalid JSON: %s", exc)
+        logger.error("Gemini returned invalid JSON: %s", exc)
         return None
     except Exception as exc:
-        logger.error("LLM call failed: %s", exc)
+        logger.error("Gemini call failed: %s", exc)
         return None
 
 
