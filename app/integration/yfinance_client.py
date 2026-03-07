@@ -206,3 +206,69 @@ async def get_analyst_sentiment(symbol: str) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
     logger.info("Fetching analyst sentiment for %s", symbol)
     return await loop.run_in_executor(_executor, _fetch_analyst_sentiment, symbol)
+
+
+def _fetch_strategic_data(symbol: str) -> dict[str, Any]:
+    """
+    Fetch all data needed for strategic analysis from a single Ticker object.
+    Bundles info (longBusinessSummary, market cap, sector...) + income_stmt
+    (revenue figures) in one yfinance call to minimize requests.
+    """
+    ticker = yf.Ticker(symbol)
+    info = ticker.info or {}
+
+    if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
+        raise ValueError(f"No data found for symbol: {symbol}")
+
+    # Revenue figures from income statement for Revenue Mix
+    revenue_mix: dict[str, float] = {}
+    try:
+        inc = ticker.income_stmt
+        if inc is not None and not inc.empty:
+            latest = inc.iloc[:, 0]
+            # Extract key revenue line items as revenue mix proxy
+            revenue_keys = [
+                "Total Revenue", "Cost Of Revenue", "Gross Profit",
+                "Operating Revenue", "Operating Income", "Net Income",
+                "Research And Development", "Selling General And Administration",
+            ]
+            for key in revenue_keys:
+                if key in latest.index and pd.notna(latest[key]):
+                    revenue_mix[key] = float(latest[key])
+    except Exception as exc:
+        logger.debug("yfinance income_stmt for strategic data failed for %s: %s", symbol, exc)
+
+    result = {
+        "company_name": info.get("longName") or info.get("shortName"),
+        "business_description": info.get("longBusinessSummary"),
+        "sector": info.get("sector"),
+        "industry": info.get("industry"),
+        "country": info.get("country"),
+        "currency": info.get("currency"),
+        "market_cap": info.get("marketCap"),
+        "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
+        "trailing_pe": info.get("trailingPE"),
+        "profit_margins": info.get("profitMargins"),
+        "revenue_growth": info.get("revenueGrowth"),
+        "earnings_growth": info.get("earningsGrowth"),
+        "return_on_equity": info.get("returnOnEquity"),
+        "total_revenue": info.get("totalRevenue"),
+        "full_time_employees": info.get("fullTimeEmployees"),
+        "revenue_mix": revenue_mix,
+    }
+
+    logger.info(
+        "yfinance strategic data for %s: desc=%d chars, sector=%s, revenue_mix=%d items",
+        symbol,
+        len(result["business_description"] or ""),
+        result["sector"],
+        len(revenue_mix),
+    )
+    return result
+
+
+async def get_strategic_data(symbol: str) -> dict[str, Any]:
+    """Fetch strategic data — bundled in one Ticker call."""
+    loop = asyncio.get_running_loop()
+    logger.info("Fetching strategic data for %s", symbol)
+    return await loop.run_in_executor(_executor, _fetch_strategic_data, symbol)

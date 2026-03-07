@@ -34,6 +34,16 @@ def create_app() -> FastAPI:
     async def health_check():
         return {"status": "ok", "version": settings.app_version}
 
+    # ── API key detection at startup ─────────────────────────────
+    import os
+    gemini_key = settings.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
+    fmp_key = settings.fmp_api_key or os.getenv("FMP_API_KEY", "")
+    logger.info(
+        "API KEYS CHECK: GEMINI_API_KEY=%s, FMP_API_KEY=%s",
+        ("DETECTED (" + gemini_key[:8] + "...)" if gemini_key else "MISSING"),
+        ("DETECTED (" + fmp_key[:8] + "...)" if fmp_key else "MISSING"),
+    )
+
     logger.info(
         "%s v%s started (env=%s)", settings.app_name, settings.app_version, settings.app_env
     )

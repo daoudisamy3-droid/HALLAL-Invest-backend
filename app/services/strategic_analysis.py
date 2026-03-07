@@ -2,9 +2,10 @@
 Strategic Analysis Engine — Data Aggregator + LLM Synthesis.
 
 Pipeline:
-  1. Aggregate data: FMP profile, product/geo segmentation, yfinance market data
-  2. Build structured prompt for Gemini (PE analyst persona)
+  1. Aggregate data exclusively from yfinance (single Ticker object)
+  2. Build a single structured prompt for Gemini (PE analyst persona)
   3. Parse structured JSON response → StrategicAnalysis
+  4. Fallback: if Gemini is slow/fails, return raw yfinance data anyway
 """
 
 import json
@@ -16,12 +17,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.core.logging import logger
-from app.integration.fmp_client import (
-    get_company_profile,
-    get_revenue_segmentation,
-    get_revenue_geo_segmentation,
-)
-from app.integration import yfinance_client
+from app.integration.yfinance_client import get_strategic_data
 from app.models.schemas import (
     MoatPillar,
     SWOT,
@@ -55,6 +51,15 @@ def _fmt_large(val: Optional[float]) -> str:
     return f"{sign}{abs_val:,.0f}"
 
 
+def _fmt_pct(val: Any) -> str:
+    if val is None:
+        return "N/A"
+    try:
+        return f"{float(val) * 100:.1f}%"
+    except (ValueError, TypeError):
+        return "N/A"
+
+
 def _get_gemini_key() -> str:
     key = get_settings().gemini_api_key
     if not key:
@@ -64,60 +69,42 @@ def _get_gemini_key() -> str:
 
 def _segments_to_pct(segments: dict[str, float]) -> dict[str, str]:
     """Convert absolute segment values to percentage strings."""
-    total = sum(segments.values())
+    total = sum(abs(v) for v in segments.values() if v > 0)
     if total <= 0:
         return {}
-    return {k: f"{v / total * 100:.1f}%" for k, v in segments.items()}
+    return {k: f"{v / total * 100:.1f}%" for k, v in segments.items() if v > 0}
 
 
-# ── Data Aggregator ──────────────────────────────────────────────
+# ── Data Aggregator (yfinance only) ─────────────────────────────
 
 async def _aggregate_data(symbol: str) -> dict[str, Any]:
     """
-    Fetch all data sources in parallel and merge into a single context dict.
-    Reuses the yfinance info call for market data (market cap, price, etc.).
+    Fetch all data from yfinance via a single Ticker object.
+    No FMP calls — avoids 403 errors entirely.
     """
-    import asyncio
+    raw = await get_strategic_data(symbol)
 
-    profile_task = get_company_profile(symbol)
-    product_seg_task = get_revenue_segmentation(symbol)
-    geo_seg_task = get_revenue_geo_segmentation(symbol)
-    info_task = yfinance_client.get_ticker_info(symbol)
-
-    profile, product_seg, geo_seg, info = await asyncio.gather(
-        profile_task, product_seg_task, geo_seg_task, info_task,
-        return_exceptions=True,
-    )
-
-    # Gracefully handle exceptions from individual fetchers
-    if isinstance(profile, Exception):
-        logger.warning("Profile fetch failed for %s: %s", symbol, profile)
-        profile = None
-    if isinstance(product_seg, Exception):
-        logger.warning("Product seg fetch failed for %s: %s", symbol, product_seg)
-        product_seg = None
-    if isinstance(geo_seg, Exception):
-        logger.warning("Geo seg fetch failed for %s: %s", symbol, geo_seg)
-        geo_seg = None
-    if isinstance(info, Exception):
-        logger.warning("yfinance info fetch failed for %s: %s", symbol, info)
-        info = {}
-
-    market_cap = _safe_float(info.get("marketCap")) if isinstance(info, dict) else None
+    market_cap = _safe_float(raw.get("market_cap"))
 
     return {
         "symbol": symbol,
-        "company_name": (profile or {}).get("companyName") or info.get("longName"),
-        "business_description": (profile or {}).get("description"),
-        "sector": (profile or {}).get("sector") or info.get("sector"),
-        "industry": (profile or {}).get("industry") or info.get("industry"),
-        "country": (profile or {}).get("country"),
+        "company_name": raw.get("company_name"),
+        "business_description": raw.get("business_description"),
+        "sector": raw.get("sector"),
+        "industry": raw.get("industry"),
+        "country": raw.get("country"),
+        "currency": raw.get("currency"),
         "market_cap": market_cap,
         "market_cap_display": _fmt_large(market_cap),
-        "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
-        "currency": info.get("currency"),
-        "product_segments": product_seg or {},
-        "geo_segments": geo_seg or {},
+        "current_price": raw.get("current_price"),
+        "trailing_pe": raw.get("trailing_pe"),
+        "profit_margins": raw.get("profit_margins"),
+        "revenue_growth": raw.get("revenue_growth"),
+        "earnings_growth": raw.get("earnings_growth"),
+        "return_on_equity": raw.get("return_on_equity"),
+        "total_revenue": raw.get("total_revenue"),
+        "full_time_employees": raw.get("full_time_employees"),
+        "revenue_mix": raw.get("revenue_mix", {}),
     }
 
 
@@ -170,40 +157,47 @@ Chaque item = un label court (3-5 mots) + un détail explicatif (1 phrase).
 
 
 def _build_user_prompt(data: dict[str, Any]) -> str:
-    """Build the user message with all aggregated data."""
-    product_pct = _segments_to_pct(data.get("product_segments", {}))
-    geo_pct = _segments_to_pct(data.get("geo_segments", {}))
+    """Build a single comprehensive prompt with all yfinance data."""
+    revenue_pct = _segments_to_pct(data.get("revenue_mix", {}))
 
     sections = [
         f"## Entreprise : {data.get('company_name', 'N/A')} ({data['symbol']})",
         f"Secteur : {data.get('sector', 'N/A')} | Industrie : {data.get('industry', 'N/A')}",
         f"Pays : {data.get('country', 'N/A')} | Devise : {data.get('currency', 'N/A')}",
         f"Market Cap : {data.get('market_cap_display', 'N/A')}",
+        f"P/E : {data.get('trailing_pe', 'N/A')} | Marge nette : {_fmt_pct(data.get('profit_margins'))}",
+        f"Croissance CA : {_fmt_pct(data.get('revenue_growth'))} | Croissance BPA : {_fmt_pct(data.get('earnings_growth'))}",
+        f"ROE : {_fmt_pct(data.get('return_on_equity'))}",
+        f"CA total : {_fmt_large(_safe_float(data.get('total_revenue')))}",
+        f"Employés : {data.get('full_time_employees', 'N/A')}",
         "",
         "## Description Business",
         data.get("business_description") or "Données non disponibles.",
         "",
-        "## Segmentation Produit (% du CA)",
-        json.dumps(product_pct, ensure_ascii=False, indent=2) if product_pct else "Données non disponibles.",
-        "",
-        "## Segmentation Géographique (% du CA)",
-        json.dumps(geo_pct, ensure_ascii=False, indent=2) if geo_pct else "Données non disponibles.",
+        "## Revenue Mix (structure du P&L)",
+        json.dumps(revenue_pct, ensure_ascii=False, indent=2) if revenue_pct else "Données non disponibles.",
     ]
 
     return "\n".join(sections)
 
 
-# ── LLM Call ─────────────────────────────────────────────────────
+# ── LLM Call (Gemini) ────────────────────────────────────────────
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
+# Timeout for Gemini: 25s request + 5s safety margin
+_GEMINI_TIMEOUT = 25.0
+
 
 async def _call_llm(user_prompt: str) -> Optional[dict]:
-    """Call Gemini via Google Generative Language API. Returns parsed JSON or None."""
+    """Call Gemini. Returns parsed JSON or None on any failure."""
     key = _get_gemini_key()
     if not key:
         logger.error("GEMINI_API_KEY is empty — set it in Railway env vars or .env file")
         return None
+
+    key_preview = key[:8] + "..." if len(key) > 8 else "***"
+    logger.info("Gemini call: key=%s, prompt_len=%d", key_preview, len(user_prompt))
 
     payload = {
         "systemInstruction": {
@@ -223,7 +217,7 @@ async def _call_llm(user_prompt: str) -> Optional[dict]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=_GEMINI_TIMEOUT) as client:
             resp = await client.post(
                 GEMINI_URL,
                 json=payload,
@@ -231,16 +225,19 @@ async def _call_llm(user_prompt: str) -> Optional[dict]:
                 headers={"content-type": "application/json"},
             )
 
+        if resp.status_code == 429:
+            logger.warning("Gemini 429 rate limit — returning fallback data")
+            return None
+
         if resp.status_code != 200:
             logger.error("Gemini API error: status=%d body=%s", resp.status_code, resp.text[:500])
             return None
 
         body = resp.json()
 
-        # Gemini response: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
         candidates = body.get("candidates", [])
         if not candidates:
-            logger.error("Gemini returned no candidates: %s", body)
+            logger.error("Gemini returned no candidates: %s", json.dumps(body)[:300])
             return None
 
         text = candidates[0]["content"]["parts"][0]["text"]
@@ -256,6 +253,9 @@ async def _call_llm(user_prompt: str) -> Optional[dict]:
         logger.info("Gemini response parsed OK (%d chars)", len(text))
         return json.loads(text)
 
+    except httpx.TimeoutException:
+        logger.warning("Gemini timeout after %.0fs — returning fallback data", _GEMINI_TIMEOUT)
+        return None
     except json.JSONDecodeError as exc:
         logger.error("Gemini returned invalid JSON: %s", exc)
         return None
@@ -267,25 +267,27 @@ async def _call_llm(user_prompt: str) -> Optional[dict]:
 # ── Main Entry Point ─────────────────────────────────────────────
 
 async def run_strategic_analysis(symbol: str) -> StrategicAnalysis:
-    """Execute the full strategic analysis pipeline."""
+    """
+    Execute the full strategic analysis pipeline.
+    ALWAYS returns a complete JSON object — uses raw yfinance data as
+    fallback if Gemini is slow, fails, or the API key is missing.
+    """
     logger.info("=== STRATEGIC ANALYSIS START for %s ===", symbol)
 
-    # Step 1: Aggregate data
+    # Step 1: Aggregate data (yfinance only — no FMP)
     data = await _aggregate_data(symbol)
     flags: list[str] = []
 
     if not data.get("business_description"):
         flags.append("DESCRIPTION_UNAVAILABLE")
-    if not data.get("product_segments"):
-        flags.append("PRODUCT_SEGMENTS_UNAVAILABLE")
-    if not data.get("geo_segments"):
-        flags.append("GEO_SEGMENTS_UNAVAILABLE")
 
-    # Step 2: Build prompt & call LLM
+    revenue_mix = data.get("revenue_mix", {})
+
+    # Step 2: Build single prompt & call Gemini
     user_prompt = _build_user_prompt(data)
     llm_result = await _call_llm(user_prompt)
 
-    # Step 3: Parse LLM output
+    # Step 3: Parse LLM output OR build fallback from raw data
     identity_flash: Optional[str] = None
     moat_pillars: list[MoatPillar] = []
     moat_average: Optional[float] = None
@@ -318,7 +320,15 @@ async def run_strategic_analysis(symbol: str) -> StrategicAnalysis:
         ]
         swot = SWOT(strengths=strengths, weaknesses=weaknesses)
     else:
+        # Fallback: map longBusinessSummary as identity_flash
+        desc = data.get("business_description")
+        if desc:
+            # Take first 3 sentences as identity flash
+            sentences = [s.strip() for s in desc.replace("\n", " ").split(".") if s.strip()]
+            identity_flash = ". ".join(sentences[:3]) + "." if sentences else None
+
         flags.append("LLM_UNAVAILABLE")
+        logger.warning("Gemini unavailable for %s — returning raw yfinance fallback", symbol)
 
     result = StrategicAnalysis(
         symbol=symbol,
@@ -328,18 +338,19 @@ async def run_strategic_analysis(symbol: str) -> StrategicAnalysis:
         industry=data.get("industry"),
         country=data.get("country"),
         market_cap_display=data.get("market_cap_display", "N/A"),
-        product_segments=data.get("product_segments", {}),
-        geo_segments=data.get("geo_segments", {}),
+        product_segments=revenue_mix,
+        geo_segments={},
         identity_flash=identity_flash,
         moat_pillars=moat_pillars,
         moat_average=moat_average,
         swot=swot,
         flags=flags,
+        source="yfinance+gemini" if llm_result else "yfinance",
         cached_at=datetime.now(timezone.utc).isoformat(),
     )
 
     logger.info(
-        "=== STRATEGIC ANALYSIS END for %s: moat_avg=%s flags=%s ===",
-        symbol, moat_average, flags,
+        "=== STRATEGIC ANALYSIS END for %s: moat_avg=%s flags=%s source=%s ===",
+        symbol, moat_average, flags, result.source,
     )
     return result
