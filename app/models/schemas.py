@@ -64,6 +64,7 @@ class AuditRatio(BaseModel):
     passed: Optional[bool] = None
     display_value: str = "N/A"
     detail: str = ""
+    source: str = "N/A"
 
 
 class FinancialScreening(BaseModel):
@@ -71,6 +72,7 @@ class FinancialScreening(BaseModel):
     debt_ratio: AuditRatio
     investments_ratio: AuditRatio
     passed: Optional[bool] = None
+    source: str = "N/A"
 
 
 class RevenueSegment(BaseModel):

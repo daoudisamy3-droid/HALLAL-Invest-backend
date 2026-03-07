@@ -63,6 +63,7 @@ def _build_ratio(
     denominator: Optional[float],
     den_label: str,
     threshold: float,
+    source: str = "N/A",
 ) -> AuditRatio:
     if numerator is None or denominator is None or denominator == 0:
         return AuditRatio(
@@ -76,6 +77,7 @@ def _build_ratio(
             passed=None,
             display_value="N/A",
             detail=f"Data unavailable: {num_label} or {den_label} is N/A",
+            source=source,
         )
     value = numerator / denominator
     passed = value < threshold
@@ -91,6 +93,7 @@ def _build_ratio(
         passed=passed,
         display_value=f"{pct}%",
         detail=f"{num_label}/{den_label} = {pct}% ({'<' if passed else '>='} {threshold * 100:.0f}%)",
+        source=source,
     )
 
 
@@ -175,24 +178,24 @@ async def _financial_screening(symbol: str, avg_mkt_cap: Optional[float]) -> tup
     stmt, source = await _fetch_balance_sheet_data(symbol)
 
     if not stmt:
-        debt_ratio = _build_ratio("Debt Ratio", None, "Total Debt", avg_mkt_cap, "Avg MCap 36m", 0.30)
-        inv_ratio = _build_ratio("Investments Ratio", None, "Total Investments", avg_mkt_cap, "Avg MCap 36m", 0.30)
-        return FinancialScreening(debt_ratio=debt_ratio, investments_ratio=inv_ratio, passed=None), None, "N/A"
+        debt_ratio = _build_ratio("Debt Ratio", None, "Total Debt", avg_mkt_cap, "Avg MCap 36m", 0.30, source="N/A")
+        inv_ratio = _build_ratio("Investments Ratio", None, "Total Investments", avg_mkt_cap, "Avg MCap 36m", 0.30, source="N/A")
+        return FinancialScreening(debt_ratio=debt_ratio, investments_ratio=inv_ratio, passed=None, source="N/A"), None, "N/A"
 
     bs_date = stmt.get("date") or stmt.get("Date") or None
 
     total_debt = _extract_debt(stmt, source)
     total_inv = _extract_investments(stmt, source)
 
-    debt_ratio = _build_ratio("Debt Ratio", total_debt, f"Total Debt ({source})", avg_mkt_cap, "Avg MCap 36m", 0.30)
-    inv_ratio = _build_ratio("Investments Ratio", total_inv, f"Total Investments ({source})", avg_mkt_cap, "Avg MCap 36m", 0.30)
+    debt_ratio = _build_ratio("Debt Ratio", total_debt, "Total Debt (ST+LT)", avg_mkt_cap, "Avg MCap 36m", 0.30, source=source)
+    inv_ratio = _build_ratio("Investments Ratio", total_inv, "Total Investments (ST+LT)", avg_mkt_cap, "Avg MCap 36m", 0.30, source=source)
 
     if debt_ratio.passed is None or inv_ratio.passed is None:
         passed = None
     else:
         passed = debt_ratio.passed and inv_ratio.passed
 
-    return FinancialScreening(debt_ratio=debt_ratio, investments_ratio=inv_ratio, passed=passed), bs_date, source
+    return FinancialScreening(debt_ratio=debt_ratio, investments_ratio=inv_ratio, passed=passed, source=source), bs_date, source
 
 
 # ── Step 3: Revenue Screening (5%) with yfinance fallback ────────
@@ -217,14 +220,27 @@ async def _fetch_income_data(symbol: str) -> tuple[Optional[dict], str]:
     return None, "N/A"
 
 
-def _extract_interest_income(stmt: dict, source: str) -> float:
-    """Extract interest income, adapting to FMP or yfinance field names."""
+def _extract_interest_income(stmt: dict, source: str) -> Optional[float]:
+    """
+    Extract interest income. Returns None if the field doesn't exist in the
+    statement — never defaults to 0 when data is truly absent.
+    """
     if source == "FMP":
-        val = _safe(stmt.get("interestIncome")) or _safe(stmt.get("interestExpense")) or 0
+        val = _safe(stmt.get("interestIncome"))
+        if val is None:
+            val = _safe(stmt.get("interestExpense"))
     else:
-        val = _safe(stmt.get("Interest Income")) or _safe(stmt.get("Interest Expense")) or 0
-    logger.info("Interest income extraction (%s): %.0f", source, abs(val))
-    return abs(val)
+        val = _safe(stmt.get("Interest Income"))
+        if val is None:
+            val = _safe(stmt.get("Interest Expense"))
+
+    if val is None:
+        logger.warning("Interest income field NOT FOUND in %s statement", source)
+        return None
+
+    result = abs(val)
+    logger.info("Interest income extraction (%s): %.0f", source, result)
+    return result
 
 
 def _extract_total_revenue(stmt: dict, source: str) -> Optional[float]:
@@ -249,9 +265,12 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
         interest_source = inc_source
         total_revenue = _extract_total_revenue(stmt, inc_source)
         logger.info(
-            "Revenue data for %s (%s): interest=%.0f, total_revenue=%s",
+            "Revenue data for %s (%s): interest=%s, total_revenue=%s",
             symbol, inc_source, interest_income, total_revenue,
         )
+        # If the interest income field was missing from the statement, flag it
+        if interest_income is None:
+            flags.append("INTEREST_INCOME_UNAVAILABLE")
     else:
         logger.warning("Income statement unavailable for %s from all sources", symbol)
         flags.append("INCOME_STMT_UNAVAILABLE")
@@ -284,10 +303,21 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
             seg_source = "N/A"
             flags.append("DATA_INCOMPLETE")
 
-    # 3c. Impure total
+    # 3c. Impure total — only compute if we have at least interest OR segments
     total_impure: Optional[float] = None
     if interest_income is not None:
         total_impure = interest_income + haram_from_segments
+    elif haram_from_segments > 0:
+        # We have segment data but no interest income — partial
+        total_impure = haram_from_segments
+
+    # Source for the impure ratio = combination of income + segmentation sources
+    impure_sources = []
+    if interest_source != "N/A":
+        impure_sources.append(interest_source)
+    if seg_source != "N/A" and seg_source not in impure_sources:
+        impure_sources.append(seg_source)
+    impure_source_str = "+".join(impure_sources) if impure_sources else "N/A"
 
     impure_ratio = _build_ratio(
         "Impure Revenue Ratio",
@@ -296,6 +326,7 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
         total_revenue,
         "Total Revenue",
         0.05,
+        source=impure_source_str,
     )
 
     passed = impure_ratio.passed
@@ -320,19 +351,39 @@ def _compute_verdict(
     fin: FinancialScreening,
     rev: RevenueScreening,
     flags: list[str],
-) -> tuple[str, str]:
+) -> tuple[str, str, list[str]]:
+    """
+    Returns (verdict, emoji, updated_flags).
+
+    Key rule: if interest_income is 0 or None AND no haram segments detected,
+    the data is insufficient to conclude compliance — never say CONFORME.
+    """
     all_results = [fin.passed, rev.passed]
 
     if any(r is False for r in all_results):
-        return "NON CONFORME", "❌"
+        return "NON CONFORME", "❌", flags
 
     if any(r is None for r in all_results):
-        return "INCOMPLET", "🟡"
+        return "INCOMPLET", "🟡", flags
 
-    if "DATA_INCOMPLETE" in flags:
-        return "À VÉRIFIER", "🟡"
+    # Suspicion check: zero impure with no segmentation = incomplete data
+    interest = rev.interest_income
+    has_segments = len(rev.haram_segments) > 0
+    has_segmentation_source = rev.segmentation_source != "N/A"
 
-    return "CONFORME", "✅"
+    if (interest is None or interest == 0) and not has_segments and not has_segmentation_source:
+        if "DATA_INCOMPLETE" not in flags:
+            flags.append("DATA_INCOMPLETE")
+        logger.warning(
+            "Verdict guardrail: interest=%s, segments=%d, seg_source=%s → cannot confirm compliance",
+            interest, len(rev.haram_segments), rev.segmentation_source,
+        )
+        return "À VÉRIFIER", "🟡", flags
+
+    if "DATA_INCOMPLETE" in flags or "INTEREST_INCOME_UNAVAILABLE" in flags:
+        return "À VÉRIFIER", "🟡", flags
+
+    return "CONFORME", "✅", flags
 
 
 def _compute_purification(
@@ -378,8 +429,8 @@ async def run_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     rev_task = _revenue_screening(symbol)
     (fin_screening, bs_date, fin_source), (rev_screening, flags) = await asyncio.gather(fin_task, rev_task)
 
-    # Step 4: verdict
-    verdict, emoji = _compute_verdict(fin_screening, rev_screening, flags)
+    # Step 4: verdict (may update flags)
+    verdict, emoji, flags = _compute_verdict(fin_screening, rev_screening, flags)
 
     # Step 5: purification
     div_rate = _safe(info.get("dividendRate"))
