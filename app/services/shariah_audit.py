@@ -21,6 +21,7 @@ from app.integration.fmp_client import (
     get_revenue_segmentation as fmp_revenue_segmentation,
 )
 from app.integration.musaffa_scraper import scrape_revenue_breakdown, HARAM_KEYWORDS
+from app.integration.yfinance_client import get_interest_income_fallback
 from app.models.schemas import (
     AAOIFIAudit,
     AuditRatio,
@@ -264,11 +265,28 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
         interest_income = _extract_interest_income(stmt, inc_source)
         interest_source = inc_source
         total_revenue = _extract_total_revenue(stmt, inc_source)
+
+        # Per-field fallback: if FMP returned the statement but interestIncome
+        # is 0 or None, try yfinance specifically for this field.
+        if (interest_income is None or interest_income == 0) and inc_source == "FMP":
+            logger.info(
+                "FMP interestIncome is %s for %s — trying yfinance fallback",
+                interest_income, symbol,
+            )
+            yf_interest = await get_interest_income_fallback(symbol)
+            if yf_interest is not None and yf_interest > 0:
+                interest_income = yf_interest
+                interest_source = "yfinance"
+                logger.info(
+                    "Interest income recovered via yfinance for %s: %.0f",
+                    symbol, interest_income,
+                )
+
         logger.info(
             "Revenue data for %s (%s): interest=%s, total_revenue=%s",
-            symbol, inc_source, interest_income, total_revenue,
+            symbol, interest_source, interest_income, total_revenue,
         )
-        # If the interest income field was missing from the statement, flag it
+        # If the interest income field was missing from all sources, flag it
         if interest_income is None:
             flags.append("INTEREST_INCOME_UNAVAILABLE")
     else:
@@ -276,6 +294,7 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
         flags.append("INCOME_STMT_UNAVAILABLE")
 
     # 3b. Revenue segmentation: FMP → Musaffa fallback
+    all_segments: list[RevenueSegment] = []
     haram_segments: list[RevenueSegment] = []
     haram_from_segments: float = 0
     seg_source = "N/A"
@@ -288,20 +307,29 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
             if val is None or val <= 0:
                 continue
             is_haram = any(kw in seg_name.lower() for kw in HARAM_KEYWORDS)
+            segment = RevenueSegment(name=seg_name, revenue=val, is_haram=is_haram)
+            all_segments.append(segment)
             if is_haram:
-                haram_segments.append(RevenueSegment(name=seg_name, revenue=val, is_haram=True))
+                haram_segments.append(segment)
                 haram_from_segments += val
-    else:
+
+    if not fmp_seg:
+        # FMP segmentation unavailable → try Musaffa scraper
         logger.info("FMP segmentation unavailable for %s, trying Musaffa", symbol)
         musaffa = await scrape_revenue_breakdown(symbol)
         if musaffa:
             seg_source = "musaffa"
-            for seg_name, seg_val in musaffa.get("haram_segments", {}).items():
-                haram_segments.append(RevenueSegment(name=seg_name, revenue=seg_val, is_haram=True))
-                haram_from_segments += seg_val
+            # Include ALL segments from Musaffa for full visibility
+            for seg_name, seg_val in musaffa.get("segments", {}).items():
+                is_haram = any(kw in seg_name.lower() for kw in HARAM_KEYWORDS)
+                segment = RevenueSegment(name=seg_name, revenue=seg_val, is_haram=is_haram)
+                all_segments.append(segment)
+                if is_haram:
+                    haram_segments.append(segment)
+                    haram_from_segments += seg_val
         else:
             seg_source = "N/A"
-            flags.append("DATA_INCOMPLETE")
+            flags.append("SEGMENTATION_UNAVAILABLE")
 
     # 3c. Impure total — only compute if we have at least interest OR segments
     total_impure: Optional[float] = None
@@ -334,6 +362,7 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
     screening = RevenueScreening(
         interest_income=interest_income,
         interest_income_source=interest_source,
+        all_segments=all_segments,
         haram_segments=haram_segments,
         total_impure=total_impure,
         total_revenue=total_revenue,
@@ -380,7 +409,7 @@ def _compute_verdict(
         )
         return "À VÉRIFIER", "🟡", flags
 
-    if "DATA_INCOMPLETE" in flags or "INTEREST_INCOME_UNAVAILABLE" in flags:
+    if any(f in flags for f in ("DATA_INCOMPLETE", "INTEREST_INCOME_UNAVAILABLE", "SEGMENTATION_UNAVAILABLE")):
         return "À VÉRIFIER", "🟡", flags
 
     return "CONFORME", "✅", flags

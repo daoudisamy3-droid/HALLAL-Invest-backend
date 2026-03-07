@@ -93,3 +93,56 @@ async def get_income_stmt(symbol: str) -> Optional[dict]:
     loop = asyncio.get_running_loop()
     logger.info("Fetching yfinance income statement for %s", symbol)
     return await loop.run_in_executor(_executor, _fetch_income_stmt, symbol)
+
+
+def _fetch_interest_income_from_funds_data(symbol: str) -> Optional[float]:
+    """Try to extract interest income from yfinance funds_data (ETFs/funds)."""
+    try:
+        ticker = yf.Ticker(symbol)
+        if hasattr(ticker, "funds_data") and ticker.funds_data is not None:
+            fd = ticker.funds_data
+            # funds_data may expose asset_classes or other breakdowns
+            if hasattr(fd, "asset_classes"):
+                ac = fd.asset_classes
+                if isinstance(ac, dict):
+                    val = ac.get("bond", {}).get("interest", None)
+                    if val is not None:
+                        return abs(float(val))
+            # Some funds expose top holdings with income info
+            logger.info("yfinance funds_data for %s: no interest income field found", symbol)
+        return None
+    except Exception as exc:
+        logger.debug("yfinance funds_data lookup failed for %s: %s", symbol, exc)
+        return None
+
+
+async def get_interest_income_fallback(symbol: str) -> Optional[float]:
+    """
+    Dedicated fallback to extract interest income from yfinance.
+    Tries income_stmt first, then funds_data.
+    """
+    loop = asyncio.get_running_loop()
+
+    # Attempt 1: standard income statement
+    stmt = await loop.run_in_executor(_executor, _fetch_income_stmt, symbol)
+    if stmt:
+        for key in ("Interest Income", "Interest Expense", "Interest Income Non Operating",
+                     "Interest Expense Non Operating"):
+            val = stmt.get(key)
+            if val is not None:
+                try:
+                    result = abs(float(val))
+                    if result > 0:
+                        logger.info("yfinance interest income fallback for %s: %s = %.0f", symbol, key, result)
+                        return result
+                except (ValueError, TypeError):
+                    continue
+
+    # Attempt 2: funds_data (for ETFs / funds)
+    result = await loop.run_in_executor(_executor, _fetch_interest_income_from_funds_data, symbol)
+    if result is not None and result > 0:
+        logger.info("yfinance funds_data interest income for %s: %.0f", symbol, result)
+        return result
+
+    logger.info("yfinance interest income fallback: nothing found for %s", symbol)
+    return None

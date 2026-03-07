@@ -86,6 +86,7 @@ class RevenueScreening(BaseModel):
     """Bloc Activités / Revenus (seuil 5%)."""
     interest_income: Optional[float] = None
     interest_income_source: str = "N/A"
+    all_segments: list[RevenueSegment] = []
     haram_segments: list[RevenueSegment] = []
     total_impure: Optional[float] = None
     total_revenue: Optional[float] = None
