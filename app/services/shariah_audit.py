@@ -3,11 +3,10 @@ AAOIFI Shariah Audit — 100% Deterministic Engine.
 
 No AI. No gap-filling. Pure arithmetic on raw API data.
 
-Sources:
-  - yfinance: 36-month close prices + sharesOutstanding → avg_market_cap_36m
-  - FMP: balance-sheet-statement → debt & investment ratios
-  - FMP: income-statement → interest income
-  - Musaffa (fallback): revenue segmentation for haram segment detection
+Data cascade:
+  1. FMP (primary)   → balance-sheet-statement, income-statement
+  2. yfinance (fallback) → ticker.balance_sheet, ticker.income_stmt
+  3. Musaffa (fallback)  → revenue segmentation scraping
 """
 
 import asyncio
@@ -17,11 +16,11 @@ from typing import Any, Optional
 from app.core.logging import logger
 from app.integration import yfinance_client
 from app.integration.fmp_client import (
-    get_balance_sheet,
-    get_income_statement,
-    get_revenue_segmentation,
+    get_balance_sheet as fmp_balance_sheet,
+    get_income_statement as fmp_income_statement,
+    get_revenue_segmentation as fmp_revenue_segmentation,
 )
-from app.integration.musaffa_scraper import scrape_revenue_breakdown
+from app.integration.musaffa_scraper import scrape_revenue_breakdown, HARAM_KEYWORDS
 from app.models.schemas import (
     AAOIFIAudit,
     AuditRatio,
@@ -98,10 +97,6 @@ def _build_ratio(
 # ── Step 1: avg_market_cap_36m via yfinance ───────────────────────
 
 async def _compute_avg_market_cap_36m(symbol: str, info: dict) -> Optional[float]:
-    """
-    Average market cap over 36 months.
-    Uses monthly close prices × sharesOutstanding from yfinance.
-    """
     shares = _safe(info.get("sharesOutstanding"))
     if shares is None:
         logger.warning("sharesOutstanding unavailable for %s", symbol)
@@ -126,89 +121,149 @@ async def _compute_avg_market_cap_36m(symbol: str, info: dict) -> Optional[float
     return avg_mkt_cap
 
 
-# ── Step 2: Financial Screening (30%) ────────────────────────────
+# ── Step 2: Financial Screening (30%) with yfinance fallback ─────
 
-async def _financial_screening(symbol: str, avg_mkt_cap: Optional[float]) -> tuple[FinancialScreening, Optional[str]]:
-    """
-    Debt ratio and investments ratio from FMP balance sheet.
-    Returns (screening, balance_sheet_date).
-    """
-    bs_date: Optional[str] = None
+async def _fetch_balance_sheet_data(symbol: str) -> tuple[Optional[dict], str]:
+    """Try FMP first, fall back to yfinance. Returns (data_dict, source)."""
 
-    bs = await get_balance_sheet(symbol, limit=1)
-    if not bs:
-        logger.warning("FMP balance sheet unavailable for %s", symbol)
+    # Attempt 1: FMP
+    fmp_data = await fmp_balance_sheet(symbol, limit=1)
+    if fmp_data and len(fmp_data) > 0:
+        logger.info("Balance sheet source: FMP for %s", symbol)
+        return fmp_data[0], "FMP"
+
+    # Attempt 2: yfinance
+    logger.info("FMP balance sheet failed for %s — falling back to yfinance", symbol)
+    yf_data = await yfinance_client.get_balance_sheet(symbol)
+    if yf_data:
+        logger.info("Balance sheet source: yfinance for %s (keys: %s)", symbol, list(yf_data.keys())[:10])
+        return yf_data, "yfinance"
+
+    logger.warning("Balance sheet unavailable from both FMP and yfinance for %s", symbol)
+    return None, "N/A"
+
+
+def _extract_debt(stmt: dict, source: str) -> float:
+    """Extract total debt from a statement dict, adapting to FMP or yfinance field names."""
+    if source == "FMP":
+        short = _safe(stmt.get("shortTermDebt")) or 0
+        long = _safe(stmt.get("longTermDebt")) or 0
+    else:
+        # yfinance uses different field names
+        short = _safe(stmt.get("Current Debt")) or _safe(stmt.get("Short Term Debt")) or 0
+        long = _safe(stmt.get("Long Term Debt")) or _safe(stmt.get("Long Term Debt And Capital Lease Obligation")) or 0
+    total = short + long
+    logger.info("Debt extraction (%s): short=%.0f + long=%.0f = %.0f", source, short, long, total)
+    return total
+
+
+def _extract_investments(stmt: dict, source: str) -> float:
+    """Extract total investments from a statement dict."""
+    if source == "FMP":
+        short = _safe(stmt.get("shortTermInvestments")) or 0
+        long = _safe(stmt.get("longTermInvestments")) or 0
+    else:
+        short = _safe(stmt.get("Other Short Term Investments")) or _safe(stmt.get("Short Term Investments")) or 0
+        long = _safe(stmt.get("Long Term Equity Investment")) or _safe(stmt.get("Investments And Advances")) or 0
+    total = short + long
+    logger.info("Investments extraction (%s): short=%.0f + long=%.0f = %.0f", source, short, long, total)
+    return total
+
+
+async def _financial_screening(symbol: str, avg_mkt_cap: Optional[float]) -> tuple[FinancialScreening, Optional[str], str]:
+    """Returns (screening, balance_sheet_date, source)."""
+    stmt, source = await _fetch_balance_sheet_data(symbol)
+
+    if not stmt:
         debt_ratio = _build_ratio("Debt Ratio", None, "Total Debt", avg_mkt_cap, "Avg MCap 36m", 0.30)
         inv_ratio = _build_ratio("Investments Ratio", None, "Total Investments", avg_mkt_cap, "Avg MCap 36m", 0.30)
-        return FinancialScreening(debt_ratio=debt_ratio, investments_ratio=inv_ratio, passed=None), None
+        return FinancialScreening(debt_ratio=debt_ratio, investments_ratio=inv_ratio, passed=None), None, "N/A"
 
-    stmt = bs[0]
-    bs_date = stmt.get("date")
+    bs_date = stmt.get("date") or stmt.get("Date") or None
 
-    logger.info(
-        "FMP balance sheet for %s (date=%s): shortTermDebt=%s, longTermDebt=%s, "
-        "shortTermInvestments=%s, longTermInvestments=%s",
-        symbol, bs_date,
-        stmt.get("shortTermDebt"), stmt.get("longTermDebt"),
-        stmt.get("shortTermInvestments"), stmt.get("longTermInvestments"),
-    )
+    total_debt = _extract_debt(stmt, source)
+    total_inv = _extract_investments(stmt, source)
 
-    short_debt = _safe(stmt.get("shortTermDebt")) or 0
-    long_debt = _safe(stmt.get("longTermDebt")) or 0
-    total_debt = short_debt + long_debt
-
-    short_inv = _safe(stmt.get("shortTermInvestments")) or 0
-    long_inv = _safe(stmt.get("longTermInvestments")) or 0
-    total_inv = short_inv + long_inv
-
-    debt_ratio = _build_ratio("Debt Ratio", total_debt, "Total Debt (ST+LT)", avg_mkt_cap, "Avg MCap 36m", 0.30)
-    inv_ratio = _build_ratio("Investments Ratio", total_inv, "Total Investments (ST+LT)", avg_mkt_cap, "Avg MCap 36m", 0.30)
+    debt_ratio = _build_ratio("Debt Ratio", total_debt, f"Total Debt ({source})", avg_mkt_cap, "Avg MCap 36m", 0.30)
+    inv_ratio = _build_ratio("Investments Ratio", total_inv, f"Total Investments ({source})", avg_mkt_cap, "Avg MCap 36m", 0.30)
 
     if debt_ratio.passed is None or inv_ratio.passed is None:
         passed = None
     else:
         passed = debt_ratio.passed and inv_ratio.passed
 
-    return FinancialScreening(debt_ratio=debt_ratio, investments_ratio=inv_ratio, passed=passed), bs_date
+    return FinancialScreening(debt_ratio=debt_ratio, investments_ratio=inv_ratio, passed=passed), bs_date, source
 
 
-# ── Step 3: Revenue Screening (5%) ───────────────────────────────
+# ── Step 3: Revenue Screening (5%) with yfinance fallback ────────
+
+async def _fetch_income_data(symbol: str) -> tuple[Optional[dict], str]:
+    """Try FMP first, fall back to yfinance. Returns (data_dict, source)."""
+
+    # Attempt 1: FMP
+    fmp_data = await fmp_income_statement(symbol, limit=1)
+    if fmp_data and len(fmp_data) > 0:
+        logger.info("Income statement source: FMP for %s", symbol)
+        return fmp_data[0], "FMP"
+
+    # Attempt 2: yfinance
+    logger.info("FMP income statement failed for %s — falling back to yfinance", symbol)
+    yf_data = await yfinance_client.get_income_stmt(symbol)
+    if yf_data:
+        logger.info("Income statement source: yfinance for %s (keys: %s)", symbol, list(yf_data.keys())[:10])
+        return yf_data, "yfinance"
+
+    logger.warning("Income statement unavailable from both FMP and yfinance for %s", symbol)
+    return None, "N/A"
+
+
+def _extract_interest_income(stmt: dict, source: str) -> float:
+    """Extract interest income, adapting to FMP or yfinance field names."""
+    if source == "FMP":
+        val = _safe(stmt.get("interestIncome")) or _safe(stmt.get("interestExpense")) or 0
+    else:
+        val = _safe(stmt.get("Interest Income")) or _safe(stmt.get("Interest Expense")) or 0
+    logger.info("Interest income extraction (%s): %.0f", source, abs(val))
+    return abs(val)
+
+
+def _extract_total_revenue(stmt: dict, source: str) -> Optional[float]:
+    """Extract total revenue."""
+    if source == "FMP":
+        return _safe(stmt.get("revenue"))
+    return _safe(stmt.get("Total Revenue"))
+
 
 async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
-    """
-    Interest income from FMP income statement.
-    Haram segments from FMP revenue segmentation or Musaffa fallback.
-    """
     flags: list[str] = []
 
-    # 3a. Interest income from FMP
+    # 3a. Interest income + total revenue
+    stmt, inc_source = await _fetch_income_data(symbol)
+
     interest_income: Optional[float] = None
     interest_source = "N/A"
     total_revenue: Optional[float] = None
 
-    inc = await get_income_statement(symbol, limit=1)
-    if inc:
-        stmt = inc[0]
+    if stmt:
+        interest_income = _extract_interest_income(stmt, inc_source)
+        interest_source = inc_source
+        total_revenue = _extract_total_revenue(stmt, inc_source)
         logger.info(
-            "FMP income statement for %s (date=%s): interestIncome=%s, revenue=%s",
-            symbol, stmt.get("date"), stmt.get("interestIncome"), stmt.get("revenue"),
+            "Revenue data for %s (%s): interest=%.0f, total_revenue=%s",
+            symbol, inc_source, interest_income, total_revenue,
         )
-        interest_income = _safe(stmt.get("interestIncome")) or 0
-        interest_source = "FMP"
-        total_revenue = _safe(stmt.get("revenue"))
     else:
-        logger.warning("FMP income statement unavailable for %s", symbol)
+        logger.warning("Income statement unavailable for %s from all sources", symbol)
         flags.append("INCOME_STMT_UNAVAILABLE")
 
-    # 3b. Revenue segmentation: try FMP first, fallback to Musaffa
+    # 3b. Revenue segmentation: FMP → Musaffa fallback
     haram_segments: list[RevenueSegment] = []
     haram_from_segments: float = 0
     seg_source = "N/A"
 
-    fmp_seg = await get_revenue_segmentation(symbol)
+    fmp_seg = await fmp_revenue_segmentation(symbol)
     if fmp_seg:
         seg_source = "FMP"
-        from app.integration.musaffa_scraper import HARAM_KEYWORDS
         for seg_name, seg_val in fmp_seg.items():
             val = _safe(seg_val)
             if val is None or val <= 0:
@@ -218,7 +273,6 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
                 haram_segments.append(RevenueSegment(name=seg_name, revenue=val, is_haram=True))
                 haram_from_segments += val
     else:
-        # Fallback: Musaffa scraper
         logger.info("FMP segmentation unavailable for %s, trying Musaffa", symbol)
         musaffa = await scrape_revenue_breakdown(symbol)
         if musaffa:
@@ -230,7 +284,7 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
             seg_source = "N/A"
             flags.append("DATA_INCOMPLETE")
 
-    # 3c. Impure total = interest income + haram segment revenue
+    # 3c. Impure total
     total_impure: Optional[float] = None
     if interest_income is not None:
         total_impure = interest_income + haram_from_segments
@@ -244,10 +298,7 @@ async def _revenue_screening(symbol: str) -> tuple[RevenueScreening, list[str]]:
         0.05,
     )
 
-    if impure_ratio.passed is None:
-        passed = None
-    else:
-        passed = impure_ratio.passed
+    passed = impure_ratio.passed
 
     screening = RevenueScreening(
         interest_income=interest_income,
@@ -270,13 +321,6 @@ def _compute_verdict(
     rev: RevenueScreening,
     flags: list[str],
 ) -> tuple[str, str]:
-    """
-    Deterministic verdict:
-    - All pass + no DATA_INCOMPLETE → CONFORME
-    - All pass + DATA_INCOMPLETE → À VÉRIFIER (Musaffa data missing)
-    - Any fail → NON CONFORME
-    - Any None → INCOMPLET
-    """
     all_results = [fin.passed, rev.passed]
 
     if any(r is False for r in all_results):
@@ -296,7 +340,6 @@ def _compute_purification(
     total_revenue: Optional[float],
     dividend_rate: Optional[float],
 ) -> Purification:
-    """Purification = (total_impure / total_revenue) × dividend_per_share."""
     if total_impure is None or total_revenue is None or total_revenue == 0:
         return Purification()
 
@@ -322,7 +365,7 @@ def _compute_purification(
 
 async def run_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     """Execute the full deterministic AAOIFI audit pipeline."""
-    logger.info("Starting AAOIFI audit for %s", symbol)
+    logger.info("=== AAOIFI AUDIT START for %s ===", symbol)
 
     # Fetch yfinance info for identity + sharesOutstanding + dividendRate
     info = await yfinance_client.get_ticker_info(symbol)
@@ -330,10 +373,10 @@ async def run_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     # Step 1: avg market cap 36m
     avg_mkt_cap = await _compute_avg_market_cap_36m(symbol, info)
 
-    # Step 2: financial screening (parallel with step 3)
+    # Step 2 + 3: parallel
     fin_task = _financial_screening(symbol, avg_mkt_cap)
     rev_task = _revenue_screening(symbol)
-    (fin_screening, bs_date), (rev_screening, flags) = await asyncio.gather(fin_task, rev_task)
+    (fin_screening, bs_date, fin_source), (rev_screening, flags) = await asyncio.gather(fin_task, rev_task)
 
     # Step 4: verdict
     verdict, emoji = _compute_verdict(fin_screening, rev_screening, flags)
@@ -344,6 +387,11 @@ async def run_aaoifi_audit(symbol: str) -> AAOIFIAudit:
         rev_screening.total_impure,
         rev_screening.total_revenue,
         div_rate,
+    )
+
+    logger.info(
+        "=== AAOIFI AUDIT END for %s: verdict=%s fin_source=%s rev_source=%s flags=%s ===",
+        symbol, verdict, fin_source, rev_screening.interest_income_source, flags,
     )
 
     return AAOIFIAudit(

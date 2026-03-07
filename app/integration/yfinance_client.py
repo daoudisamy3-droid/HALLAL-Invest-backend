@@ -1,6 +1,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Optional
 
 import yfinance as yf
 import pandas as pd
@@ -56,3 +56,40 @@ async def get_fast_price(symbol: str) -> dict[str, float]:
     loop = asyncio.get_running_loop()
     logger.info("Fetching fast price for %s", symbol)
     return await loop.run_in_executor(_executor, _fetch_fast_price, symbol)
+
+
+def _fetch_balance_sheet(symbol: str) -> Optional[dict]:
+    """Fetch latest annual balance sheet from yfinance as a flat dict."""
+    ticker = yf.Ticker(symbol)
+    bs = ticker.balance_sheet
+    if bs is None or bs.empty:
+        return None
+    # bs columns are dates, rows are line items. Take the latest column.
+    latest = bs.iloc[:, 0]
+    result = {row: val for row, val in latest.items() if pd.notna(val)}
+    logger.info("yfinance balance sheet for %s: %d items", symbol, len(result))
+    return result
+
+
+def _fetch_income_stmt(symbol: str) -> Optional[dict]:
+    """Fetch latest annual income statement from yfinance as a flat dict."""
+    ticker = yf.Ticker(symbol)
+    inc = ticker.income_stmt
+    if inc is None or inc.empty:
+        return None
+    latest = inc.iloc[:, 0]
+    result = {row: val for row, val in latest.items() if pd.notna(val)}
+    logger.info("yfinance income stmt for %s: %d items", symbol, len(result))
+    return result
+
+
+async def get_balance_sheet(symbol: str) -> Optional[dict]:
+    loop = asyncio.get_running_loop()
+    logger.info("Fetching yfinance balance sheet for %s", symbol)
+    return await loop.run_in_executor(_executor, _fetch_balance_sheet, symbol)
+
+
+async def get_income_stmt(symbol: str) -> Optional[dict]:
+    loop = asyncio.get_running_loop()
+    logger.info("Fetching yfinance income statement for %s", symbol)
+    return await loop.run_in_executor(_executor, _fetch_income_stmt, symbol)
