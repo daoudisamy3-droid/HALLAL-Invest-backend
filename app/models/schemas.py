@@ -167,7 +167,7 @@ class StrategicAnalysis(BaseModel):
     swot: SWOT = SWOT()
 
     flags: list[str] = []
-    source: str = "FMP+LLM"
+    source: str = "yfinance"
     cached_at: Optional[str] = None
 
 

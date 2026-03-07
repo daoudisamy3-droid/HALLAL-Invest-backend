@@ -14,7 +14,9 @@ from typing import Any, Optional
 from app.core.logging import logger
 from app.integration.yfinance_client import get_strategic_data
 from app.models.schemas import (
+    MoatPillar,
     SWOT,
+    SWOTItem,
     StrategicAnalysis,
 )
 
@@ -75,6 +77,25 @@ async def run_strategic_analysis(symbol: str) -> StrategicAnalysis:
     market_cap = _safe_float(raw.get("market_cap"))
     revenue_mix = raw.get("revenue_mix", {})
 
+    # Moat & SWOT: placeholder pending LLM reactivation
+    _PENDING = "Données techniques en cours de calcul"
+    moat_pillars = [
+        MoatPillar(name="Pricing Power", score=0, comment=_PENDING),
+        MoatPillar(name="Switching Cost", score=0, comment=_PENDING),
+        MoatPillar(name="Network Effect", score=0, comment=_PENDING),
+        MoatPillar(name="Intangible Assets", score=0, comment=_PENDING),
+    ]
+    swot = SWOT(
+        strengths=[
+            SWOTItem(label="En attente", detail=_PENDING),
+            SWOTItem(label="En attente", detail=_PENDING),
+        ],
+        weaknesses=[
+            SWOTItem(label="En attente", detail=_PENDING),
+            SWOTItem(label="En attente", detail=_PENDING),
+        ],
+    )
+
     result = StrategicAnalysis(
         symbol=symbol,
         company_name=raw.get("company_name"),
@@ -86,9 +107,9 @@ async def run_strategic_analysis(symbol: str) -> StrategicAnalysis:
         product_segments=revenue_mix,
         geo_segments={},
         identity_flash=identity_flash,
-        moat_pillars=[],
+        moat_pillars=moat_pillars,
         moat_average=None,
-        swot=SWOT(),
+        swot=swot,
         flags=flags,
         source="yfinance",
         cached_at=datetime.now(timezone.utc).isoformat(),
