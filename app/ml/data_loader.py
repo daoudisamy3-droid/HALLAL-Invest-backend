@@ -63,7 +63,7 @@ async def fetch_ohlcv(
         "end": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "limit": limit,
         "adjustment": "split",
-        "feed": "sip",
+        "feed": "iex",
         "sort": "asc",
     }
     headers = {
