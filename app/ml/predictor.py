@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from app.core.logging import logger
+from app.integration import yfinance_client
 from app.ml.data_loader import fetch_ohlcv
 from app.ml.features import build_features, FEATURE_COLUMNS
 from app.ml.targets import TARGET_COLUMNS
@@ -86,7 +87,17 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
     df_raw = await fetch_ohlcv(symbol, limit=100)
     df_feat = build_features(df_raw)
     last_row = df_feat[FEATURE_COLUMNS].iloc[[-1]]  # keep as DataFrame
-    current_price = float(df_feat["close"].iloc[-1])
+
+    # Use YFinance as the authoritative current price (matches frontend header)
+    try:
+        yf_data = await yfinance_client.get_fast_price(symbol)
+        current_price = float(yf_data.get("price") or yf_data.get("current_price"))
+    except Exception as exc:
+        logger.warning(
+            "YFinance price unavailable for %s (%s), falling back to Alpaca last close",
+            symbol, exc,
+        )
+        current_price = float(df_feat["close"].iloc[-1])
 
     # ── Step 3: Predict for each horizon ──────────────────────────
     predictions: dict[str, dict[str, float]] = {}

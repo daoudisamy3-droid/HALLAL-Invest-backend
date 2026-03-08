@@ -3,6 +3,8 @@ Data Loader — Alpaca Markets REST API → pandas DataFrame.
 
 Fetches daily OHLCV bars for a given symbol.
 Retry logic: up to 3 retries with exponential backoff on transient errors.
+After fetch, prices are recalibrated against the YFinance live price
+to correct any split/ADR discrepancies between data sources.
 """
 
 import asyncio
@@ -62,7 +64,7 @@ async def fetch_ohlcv(
         "start": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "end": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "limit": limit,
-        "adjustment": "split",
+        "adjustment": "all",
         "feed": "iex",
         "sort": "asc",
     }
@@ -87,7 +89,8 @@ async def fetch_ohlcv(
                         f"Alpaca returned 0 bars for '{symbol}'. "
                         "The symbol may be invalid or have no trading history."
                     )
-                return _bars_to_dataframe(bars, symbol)
+                df = _bars_to_dataframe(bars, symbol)
+                return await _recalibrate_prices(df, symbol)
 
             # Auth errors — no point retrying
             if resp.status_code in (401, 403):
@@ -157,5 +160,63 @@ def _bars_to_dataframe(bars: list[dict], symbol: str) -> pd.DataFrame:
         df["timestamp"].iloc[0].strftime("%Y-%m-%d"),
         df["timestamp"].iloc[-1].strftime("%Y-%m-%d"),
     )
+
+    return df
+
+
+# ── YFinance recalibration ────────────────────────────────────────
+
+_SCALING_THRESHOLD = 0.005  # 0.5 %
+_PRICE_COLUMNS = ["open", "high", "low", "close"]
+
+
+async def _recalibrate_prices(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """
+    Align Alpaca historical prices to the YFinance live price.
+
+    If the last close from Alpaca differs from the YFinance price by more
+    than 0.5 %, all OHLC columns are scaled proportionally.  This corrects
+    split / ADR / adjustment mismatches between data providers.
+    """
+    from app.integration import yfinance_client  # local import to avoid circular deps
+
+    try:
+        price_data = await yfinance_client.get_fast_price(symbol)
+        yf_price = price_data.get("price") or price_data.get("current_price")
+        if yf_price is None:
+            logger.warning("YFinance returned no price for %s — skipping recalibration", symbol)
+            return df
+        yf_price = float(yf_price)
+    except Exception as exc:
+        logger.warning("YFinance price fetch failed for %s (%s) — skipping recalibration", symbol, exc)
+        return df
+
+    alpaca_last_close = float(df["close"].iloc[-1])
+
+    if alpaca_last_close == 0:
+        logger.warning("Alpaca last close is 0 for %s — skipping recalibration", symbol)
+        return df
+
+    scaling_factor = yf_price / alpaca_last_close
+    deviation = abs(scaling_factor - 1.0)
+
+    if deviation <= _SCALING_THRESHOLD:
+        logger.info(
+            "No recalibration needed for %s (deviation=%.4f%%, threshold=%.1f%%)",
+            symbol, deviation * 100, _SCALING_THRESHOLD * 100,
+        )
+        return df
+
+    # Apply scaling to all price columns
+    logger.info(
+        "Recalibrage appliqué pour %s: facteur %.6f "
+        "(YF=%.2f, Alpaca=%.2f, écart=%.2f%%)",
+        symbol, scaling_factor, yf_price, alpaca_last_close, deviation * 100,
+    )
+
+    df = df.copy()
+    for col in _PRICE_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col] * scaling_factor
 
     return df
