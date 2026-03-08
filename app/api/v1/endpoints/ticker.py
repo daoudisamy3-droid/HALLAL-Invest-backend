@@ -181,10 +181,8 @@ async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     response_model=StrategicAnalysis,
     summary="Strategic Analysis (INFOS tab)",
     description=(
-        "Data aggregator (FMP profile, product/geo segmentation, market data) "
-        "combined with LLM synthesis: Identité Flash (3 phrases), "
-        "Moat Score (4 pillars, 1-5), and SWOT (2+/2-). "
-        "Results cached 24h to minimize LLM token consumption."
+        "yfinance identity + FMP/Musaffa revenue segments + sector-based "
+        "Moat/SWOT defaults. Always returns 200 with all JSON keys present."
     ),
     dependencies=[Depends(rate_limit_dependency)],
 )
@@ -193,7 +191,7 @@ async def get_strategic_analysis(symbol: str) -> StrategicAnalysis:
     if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
-    # Check cache — avoid burning LLM tokens on refresh
+    # Check cache
     now = time.time()
     if symbol in _strategic_cache:
         cached_at, cached_result = _strategic_cache[symbol]
@@ -202,13 +200,19 @@ async def get_strategic_analysis(symbol: str) -> StrategicAnalysis:
             return cached_result
 
     from app.services.strategic_analysis import run_strategic_analysis
+
+    # Always return 200 — run_strategic_analysis never raises,
+    # but we guard against unexpected errors anyway.
     try:
         result = await run_strategic_analysis(symbol)
     except Exception as exc:
         logger.error("Strategic analysis failed for %s: %s", symbol, exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Strategic analysis failed for '{symbol}': {exc}",
+        from datetime import datetime, timezone
+        result = StrategicAnalysis(
+            symbol=symbol,
+            flags=["INTERNAL_ERROR"],
+            source="yfinance",
+            cached_at=datetime.now(timezone.utc).isoformat(),
         )
 
     _strategic_cache[symbol] = (now, result)
