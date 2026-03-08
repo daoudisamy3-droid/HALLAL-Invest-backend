@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     fmp_api_key: str = ""
     gemini_api_key: str = ""
 
+    # Alpaca Markets
+    alpaca_api_key: str = ""
+    alpaca_api_secret: str = ""
+    alpaca_base_url: str = "https://data.alpaca.markets"
+
     # CORS
     cors_origins: str = "http://localhost:3000,http://localhost:5173,https://hallal-invest-frontend-production.up.railway.app"
 
