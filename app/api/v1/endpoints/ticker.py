@@ -418,3 +418,47 @@ async def get_strategy(symbol: str) -> dict:
     logger.info("Strategy cached for %s (TTL=7d)", symbol)
 
     return result
+
+
+# ── 24h cache for strategy-data (yfinance only) ──────────────────
+_strategy_data_cache: dict[str, tuple[float, dict]] = {}
+
+
+@router.get(
+    "/ticker/{symbol}/strategy-data",
+    summary="Raw Strategy Data (yfinance)",
+    description=(
+        "Pure yfinance extraction: pitch, sector/industry context, "
+        "financial ratios for SWOT inference, analyst sentiment, and peers. "
+        "No AI involved. Cached 24h."
+    ),
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def get_strategy_data_endpoint(symbol: str) -> dict:
+    symbol = symbol.upper().strip()
+    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+
+    # Check 24h cache
+    now = time.time()
+    if symbol in _strategy_data_cache:
+        cached_at, cached_result = _strategy_data_cache[symbol]
+        if now - cached_at < _CACHE_TTL:
+            logger.info("Strategy-data cache hit for %s", symbol)
+            return cached_result
+
+    from app.services.ticker_service import get_strategy_data
+
+    try:
+        result = await get_strategy_data(symbol)
+    except Exception as exc:
+        logger.error("Strategy data extraction failed for %s: %s", symbol, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not extract strategy data for '{symbol}': {exc}",
+        )
+
+    _strategy_data_cache[symbol] = (now, result)
+    logger.info("Strategy-data cached for %s (TTL=24h)", symbol)
+
+    return result
