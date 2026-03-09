@@ -128,7 +128,7 @@ async def _compute_avg_market_cap_36m(symbol: str, info: dict) -> Optional[float
 # ── Step 2: Financial Screening (30%) with yfinance fallback ─────
 
 async def _fetch_balance_sheet_data(symbol: str) -> tuple[Optional[dict], str]:
-    """Try FMP first, fall back to yfinance. Returns (data_dict, source)."""
+    """Try FMP first, fall back to yfinance, then OpenBB. Returns (data_dict, source)."""
 
     # Attempt 1: FMP
     fmp_data = await fmp_balance_sheet(symbol, limit=1)
@@ -143,12 +143,26 @@ async def _fetch_balance_sheet_data(symbol: str) -> tuple[Optional[dict], str]:
         logger.info("Balance sheet source: yfinance for %s (keys: %s)", symbol, list(yf_data.keys())[:10])
         return yf_data, "yfinance"
 
-    logger.warning("Balance sheet unavailable from both FMP and yfinance for %s", symbol)
+    # Attempt 3: OpenBB SDK
+    logger.info("yfinance balance sheet failed for %s — falling back to OpenBB", symbol)
+    try:
+        from app.services.shariah_service import get_audit_data
+        obb_data = await get_audit_data(symbol)
+        if obb_data.get("total_assets") is not None or obb_data.get("total_debt") is not None:
+            logger.info("Balance sheet source: OpenBB for %s", symbol)
+            return obb_data, "openbb"
+    except Exception as exc:
+        logger.warning("OpenBB balance sheet fallback failed for %s: %s", symbol, exc)
+
+    logger.warning("Balance sheet unavailable from FMP, yfinance and OpenBB for %s", symbol)
     return None, "N/A"
 
 
 def _extract_debt(stmt: dict, source: str) -> float:
-    """Extract total debt from a statement dict, adapting to FMP or yfinance field names."""
+    """Extract total debt from a statement dict, adapting to FMP, yfinance or OpenBB field names."""
+    if source == "openbb":
+        # OpenBB dict from shariah_service already has total_debt computed
+        return _safe(stmt.get("total_debt")) or 0
     if source == "FMP":
         short = _safe(stmt.get("shortTermDebt")) or 0
         long = _safe(stmt.get("longTermDebt")) or 0
@@ -163,6 +177,9 @@ def _extract_debt(stmt: dict, source: str) -> float:
 
 def _extract_investments(stmt: dict, source: str) -> float:
     """Extract total investments from a statement dict."""
+    if source == "openbb":
+        # OpenBB doesn't pre-compute investments; return 0 (conservative)
+        return 0
     if source == "FMP":
         short = _safe(stmt.get("shortTermInvestments")) or 0
         long = _safe(stmt.get("longTermInvestments")) or 0
@@ -172,6 +189,16 @@ def _extract_investments(stmt: dict, source: str) -> float:
     total = short + long
     logger.info("Investments extraction (%s): short=%.0f + long=%.0f = %.0f", source, short, long, total)
     return total
+
+
+def _extract_total_assets(stmt: dict, source: str) -> Optional[float]:
+    """Extract total assets from a statement dict."""
+    if source == "openbb":
+        return _safe(stmt.get("total_assets"))
+    if source == "FMP":
+        return _safe(stmt.get("totalAssets"))
+    # yfinance
+    return _safe(stmt.get("Total Assets"))
 
 
 async def _financial_screening(symbol: str, avg_mkt_cap: Optional[float]) -> tuple[FinancialScreening, Optional[str], str]:
@@ -188,7 +215,26 @@ async def _financial_screening(symbol: str, avg_mkt_cap: Optional[float]) -> tup
     total_debt = _extract_debt(stmt, source)
     total_inv = _extract_investments(stmt, source)
 
-    debt_ratio = _build_ratio("Debt Ratio", total_debt, "Total Debt (ST+LT)", avg_mkt_cap, "Avg MCap 36m", 0.30, source=source)
+    # ── Primary: Debt/Assets ratio (OpenBB or any source with total_assets)
+    total_assets = _extract_total_assets(stmt, source)
+
+    if total_assets and total_assets > 0:
+        # Use Debt/Total Assets as the primary debt ratio (AAOIFI threshold: 30%)
+        logger.info(
+            "Using Debt/Assets ratio for %s: debt=%.0f / assets=%.0f (source=%s)",
+            symbol, total_debt, total_assets, source,
+        )
+        debt_ratio = _build_ratio(
+            "Debt Ratio", total_debt, "Total Debt",
+            total_assets, "Total Assets", 0.30, source=source,
+        )
+    else:
+        # Fallback: Debt / Avg Market Cap 36m
+        debt_ratio = _build_ratio(
+            "Debt Ratio", total_debt, "Total Debt (ST+LT)",
+            avg_mkt_cap, "Avg MCap 36m", 0.30, source=source,
+        )
+
     inv_ratio = _build_ratio("Investments Ratio", total_inv, "Total Investments (ST+LT)", avg_mkt_cap, "Avg MCap 36m", 0.30, source=source)
 
     if debt_ratio.passed is None or inv_ratio.passed is None:
