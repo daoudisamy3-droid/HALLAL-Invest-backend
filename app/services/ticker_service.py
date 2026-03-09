@@ -1,20 +1,14 @@
 """
 Ticker Service — Raw yfinance data extraction for the INFOS tab.
 
-Pure data mapping, no AI/LLM. Extracts structured fields from
-yfinance ticker.info for frontend consumption.
+Pure data mapping, no AI/LLM. Uses the shared yfinance_client
+to extract structured fields for frontend consumption.
 """
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
-import yfinance as yf
-
 from app.core.logging import logger
-
-
-_executor = ThreadPoolExecutor(max_workers=4)
+from app.integration.yfinance_client import get_ticker_info
 
 
 def _safe_float(val: Any) -> Optional[float]:
@@ -33,22 +27,31 @@ def _fmt_pct(val: Optional[float]) -> Optional[str]:
     return f"{val * 100:.2f}%"
 
 
-def _extract_strategy_data(symbol: str) -> dict[str, Any]:
-    """
-    Blocking call — extract all INFOS-tab data from yfinance.
+def _fmt_num(val: Optional[float]) -> Optional[str]:
+    if val is None:
+        return None
+    return f"{val:.2f}"
 
-    Returns a flat dict with:
-      - pitch: business description
-      - context: sector/industry/country
-      - swot_ratios: key financial ratios for SWOT inference
-      - sentiment: analyst consensus
-      - competitors: peer companies (from yfinance recommendations/sector)
-    """
-    ticker = yf.Ticker(symbol)
-    info = ticker.info or {}
 
-    if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
-        raise ValueError(f"No data found for symbol: {symbol}")
+async def get_strategy_data(symbol: str) -> dict[str, Any]:
+    """
+    Extract all INFOS-tab data from yfinance via the shared client.
+
+    Returns:
+        {
+            "symbol", "company_name",
+            "pitch": longBusinessSummary,
+            "context": {sector, industry, country, ...},
+            "swot_ratios": {profit_margins, roe, revenue_growth, ...},
+            "sentiment": {recommendation_key, recommendation_mean, ...},
+            "competitors": [...],
+            "market_data": {market_cap, current_price, beta},
+            "source": "yfinance"
+        }
+    """
+    symbol = symbol.upper().strip()
+
+    info = await get_ticker_info(symbol)
 
     # ── Pitch ─────────────────────────────────────────────────────
     pitch = info.get("longBusinessSummary")
@@ -77,34 +80,25 @@ def _extract_strategy_data(symbol: str) -> dict[str, Any]:
         "return_on_equity": {"value": roe, "display": _fmt_pct(roe)},
         "revenue_growth": {"value": revenue_growth, "display": _fmt_pct(revenue_growth)},
         "earnings_growth": {"value": earnings_growth, "display": _fmt_pct(earnings_growth)},
-        "debt_to_equity": {"value": debt_to_equity, "display": f"{debt_to_equity:.2f}" if debt_to_equity is not None else None},
-        "current_ratio": {"value": current_ratio, "display": f"{current_ratio:.2f}" if current_ratio is not None else None},
+        "debt_to_equity": {"value": debt_to_equity, "display": _fmt_num(debt_to_equity)},
+        "current_ratio": {"value": current_ratio, "display": _fmt_num(current_ratio)},
         "operating_margins": {"value": operating_margins, "display": _fmt_pct(operating_margins)},
         "gross_margins": {"value": gross_margins, "display": _fmt_pct(gross_margins)},
     }
 
     # ── Sentiment ─────────────────────────────────────────────────
     sentiment = {
-        "recommendation_key": info.get("recommendationKey"),       # e.g. "buy"
-        "recommendation_mean": _safe_float(info.get("recommendationMean")),  # 1.0–5.0
+        "recommendation_key": info.get("recommendationKey"),
+        "recommendation_mean": _safe_float(info.get("recommendationMean")),
         "target_mean_price": _safe_float(info.get("targetMeanPrice")),
         "number_of_analysts": info.get("numberOfAnalystOpinions"),
     }
 
     # ── Competitors / Peers ───────────────────────────────────────
+    # yfinance doesn't expose a direct peers list in .info,
+    # but some builds include companyOfficers or related fields.
+    # We return an empty list — the frontend can fill this from /strategy (Gemini).
     competitors: list[dict[str, str]] = []
-    try:
-        # yfinance exposes recommendations_summary or similar peer data
-        # on some tickers; we also check for sector peers via industry
-        recs = ticker.recommendations
-        if recs is not None and not recs.empty:
-            # Recent analyst firms as a proxy for "who covers this stock"
-            firms = recs.get("Firm", recs.get("firm", None))
-            if firms is not None:
-                unique_firms = list(firms.dropna().unique()[:5])
-                competitors = [{"name": f, "tag": "analyst_firm"} for f in unique_firms]
-    except Exception as exc:
-        logger.debug("Could not extract peers for %s: %s", symbol, exc)
 
     # ── Market data for context ───────────────────────────────────
     market_cap = _safe_float(info.get("marketCap"))
@@ -136,20 +130,3 @@ def _extract_strategy_data(symbol: str) -> dict[str, Any]:
     )
 
     return result
-
-
-async def get_strategy_data(symbol: str) -> dict[str, Any]:
-    """
-    Async wrapper for raw yfinance strategy data extraction.
-
-    Args:
-        symbol: Ticker symbol (e.g. "AAPL").
-
-    Returns:
-        Structured dict with pitch, context, swot_ratios, sentiment, competitors.
-
-    Raises:
-        ValueError: If symbol not found on yfinance.
-    """
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_executor, _extract_strategy_data, symbol.upper().strip())
