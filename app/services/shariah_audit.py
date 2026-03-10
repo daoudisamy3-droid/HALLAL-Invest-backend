@@ -128,7 +128,7 @@ async def _compute_avg_market_cap_36m(symbol: str, info: dict) -> Optional[float
 # ── Step 2: Financial Screening (30%) with yfinance fallback ─────
 
 async def _fetch_balance_sheet_data(symbol: str) -> tuple[Optional[dict], str]:
-    """Try FMP first, fall back to yfinance, then OpenBB. Returns (data_dict, source)."""
+    """Try FMP first, fall back to yfinance (via shariah_service). Returns (data_dict, source)."""
 
     # Attempt 1: FMP
     fmp_data = await fmp_balance_sheet(symbol, limit=1)
@@ -136,33 +136,30 @@ async def _fetch_balance_sheet_data(symbol: str) -> tuple[Optional[dict], str]:
         logger.info("Balance sheet source: FMP for %s", symbol)
         return fmp_data[0], "FMP"
 
-    # Attempt 2: yfinance
+    # Attempt 2: yfinance (standard client)
     logger.info("FMP balance sheet failed for %s — falling back to yfinance", symbol)
     yf_data = await yfinance_client.get_balance_sheet(symbol)
     if yf_data:
         logger.info("Balance sheet source: yfinance for %s (keys: %s)", symbol, list(yf_data.keys())[:10])
         return yf_data, "yfinance"
 
-    # Attempt 3: OpenBB SDK
-    logger.info("yfinance balance sheet failed for %s — falling back to OpenBB", symbol)
+    # Attempt 3: shariah_service (quarterly balance sheet + adjusted close)
+    logger.info("yfinance annual failed for %s — trying shariah_service (quarterly)", symbol)
     try:
         from app.services.shariah_service import get_audit_data
-        obb_data = await get_audit_data(symbol)
-        if obb_data.get("total_assets") is not None or obb_data.get("total_debt") is not None:
-            logger.info("Balance sheet source: OpenBB for %s", symbol)
-            return obb_data, "openbb"
+        svc_data = await get_audit_data(symbol)
+        if svc_data.get("total_assets") is not None or svc_data.get("total_debt") is not None:
+            logger.info("Balance sheet source: shariah_service for %s", symbol)
+            return svc_data, "yfinance"
     except Exception as exc:
-        logger.warning("OpenBB balance sheet fallback failed for %s: %s", symbol, exc)
+        logger.warning("shariah_service fallback failed for %s: %s", symbol, exc)
 
-    logger.warning("Balance sheet unavailable from FMP, yfinance and OpenBB for %s", symbol)
+    logger.warning("Balance sheet unavailable from all sources for %s", symbol)
     return None, "N/A"
 
 
 def _extract_debt(stmt: dict, source: str) -> float:
-    """Extract total debt from a statement dict, adapting to FMP, yfinance or OpenBB field names."""
-    if source == "openbb":
-        # OpenBB dict from shariah_service already has total_debt computed
-        return _safe(stmt.get("total_debt")) or 0
+    """Extract total debt from a statement dict, adapting to FMP or yfinance field names."""
     if source == "FMP":
         short = _safe(stmt.get("shortTermDebt")) or 0
         long = _safe(stmt.get("longTermDebt")) or 0
@@ -177,9 +174,6 @@ def _extract_debt(stmt: dict, source: str) -> float:
 
 def _extract_investments(stmt: dict, source: str) -> float:
     """Extract total investments from a statement dict."""
-    if source == "openbb":
-        # OpenBB doesn't pre-compute investments; return 0 (conservative)
-        return 0
     if source == "FMP":
         short = _safe(stmt.get("shortTermInvestments")) or 0
         long = _safe(stmt.get("longTermInvestments")) or 0
@@ -193,8 +187,6 @@ def _extract_investments(stmt: dict, source: str) -> float:
 
 def _extract_total_assets(stmt: dict, source: str) -> Optional[float]:
     """Extract total assets from a statement dict."""
-    if source == "openbb":
-        return _safe(stmt.get("total_assets"))
     if source == "FMP":
         return _safe(stmt.get("totalAssets"))
     # yfinance
