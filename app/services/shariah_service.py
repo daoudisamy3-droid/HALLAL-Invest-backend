@@ -3,6 +3,9 @@ OpenBB-powered balance sheet fetcher for Shariah audit.
 
 Uses `obb.equity.fundamental.balance` with the yfinance provider
 to extract total_assets and total_debt for the AAOIFI debt/assets ratio.
+
+Gracefully degrades: if OpenBB is not installed or fails to import,
+get_audit_data() returns empty results so the backend starts without error.
 """
 
 import asyncio
@@ -13,38 +16,49 @@ from app.core.logging import logger
 
 _executor = ThreadPoolExecutor(max_workers=2)
 
+# ── Safe import: backend starts even if openbb is missing ─────────
+_obb = None
+try:
+    from openbb import obb as _obb  # noqa: F811
+    logger.info("OpenBB SDK loaded successfully")
+except ImportError:
+    logger.warning("OpenBB SDK not available — shariah_service will return empty results")
+except Exception as exc:
+    logger.warning("OpenBB SDK import error: %s — shariah_service will return empty results", exc)
+
+_EMPTY = {"total_assets": None, "total_debt": None, "source": "openbb/yfinance"}
+
 
 def _fetch_balance_openbb(symbol: str) -> dict:
     """
     Blocking call — fetches the latest annual balance sheet via OpenBB SDK.
     Returns {"total_assets": float|None, "total_debt": float|None, "source": "openbb/yfinance"}.
     """
-    from openbb import obb
+    if _obb is None:
+        return _EMPTY
 
     try:
-        result = obb.equity.fundamental.balance(symbol, provider="yfinance")
+        result = _obb.equity.fundamental.balance(symbol, provider="yfinance")
     except Exception as exc:
         logger.warning("OpenBB balance fetch failed for %s: %s", symbol, exc)
-        return {"total_assets": None, "total_debt": None, "source": "openbb/yfinance"}
+        return _EMPTY
 
     # result.results is a list of balance sheet entries; take the most recent
     entries = result.results if hasattr(result, "results") else []
     if not entries:
         logger.warning("OpenBB returned no balance sheet data for %s", symbol)
-        return {"total_assets": None, "total_debt": None, "source": "openbb/yfinance"}
+        return _EMPTY
 
     latest = entries[0]
 
     # Extract total_assets
     total_assets: Optional[float] = None
-    for attr in ("total_assets",):
-        val = getattr(latest, attr, None)
-        if val is not None:
-            try:
-                total_assets = float(val)
-            except (ValueError, TypeError):
-                pass
-            break
+    val = getattr(latest, "total_assets", None)
+    if val is not None:
+        try:
+            total_assets = float(val)
+        except (ValueError, TypeError):
+            pass
 
     # Extract total_debt (try total_debt first, then sum short+long term)
     total_debt: Optional[float] = None
@@ -93,12 +107,10 @@ async def get_audit_data(symbol: str) -> dict:
     """
     Async wrapper — returns balance sheet data from OpenBB SDK.
 
-    Returns:
-        {
-            "total_assets": float | None,
-            "total_debt": float | None,
-            "source": "openbb/yfinance",
-        }
+    Returns empty results if OpenBB is not installed, so the backend
+    always starts and the audit falls back to FMP/yfinance.
     """
+    if _obb is None:
+        return _EMPTY
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, _fetch_balance_openbb, symbol)
