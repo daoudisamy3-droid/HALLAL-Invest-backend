@@ -18,8 +18,8 @@ async def world_indices():
 
 @router.get(
     "/macro/comparison",
-    summary="Base-0 intraday comparison (LineChart-ready)",
-    description="Flat array of {time, US500, NDX100, FR40, DE40, JP225} with % change from day open.",
+    summary="24h Follow-the-Sun comparison (LineChart-ready)",
+    description="Flat array of {time, US500, NDX100, FR40, DE40, JP225} on a UTC 24h axis. Each index normalised to 0% at its own session open. Asia → Europe → USA.",
     dependencies=[Depends(rate_limit_dependency)],
 )
 async def comparison():

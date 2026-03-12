@@ -89,7 +89,12 @@ async def get_world_indices() -> list[dict[str, Any]]:
     return list(results)
 
 
-# ── Chart-ready comparison (Base 0 = % change from day open) ──────
+# ── 24h Follow-the-Sun comparison (Base 0 per session open) ───────
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
 
 # Short labels for the LineChart
 _CHART_KEYS: dict[str, str] = {
@@ -101,14 +106,18 @@ _CHART_KEYS: dict[str, str] = {
 }
 
 
-def _fetch_intraday_series(symbol: str) -> Optional[list[tuple[str, float]]]:
+def _fetch_intraday_24h(symbol: str) -> Optional[list[tuple[str, float]]]:
     """
-    Fetch today's intraday 15-min closes for one index.
-    Returns list of (HH:MM, pct_change_from_open) or None.
+    Fetch the last 2 trading days at 15-min intervals, trim to the most
+    recent 24 UTC hours, and normalise each index to 0% at its own
+    session-open price.
+
+    Returns list of (UTC "HH:MM", pct_change) sorted chronologically.
     """
+    meta = INDICES[symbol]
     try:
         ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="1d", interval="15m")
+        hist = ticker.history(period="2d", interval="15m")
         if hist is None or hist.empty:
             return None
 
@@ -116,42 +125,67 @@ def _fetch_intraday_series(symbol: str) -> Optional[list[tuple[str, float]]]:
         if close.empty:
             return None
 
-        base = float(close.iloc[0])
-        if base == 0:
-            return None
+        # Convert index to UTC for a unified axis
+        utc = ZoneInfo("UTC")
+        local_tz = ZoneInfo(meta["tz"])
+        open_time = meta["open"]
+
+        # Find session-open price: the first bar of the most recent
+        # trading session in the index's local timezone.
+        session_open_price: Optional[float] = None
+        for ts, val in close.items():
+            local_dt = ts.astimezone(local_tz)
+            if local_dt.time() >= open_time:
+                session_open_price = float(val)
+                break
+
+        if session_open_price is None or session_open_price == 0:
+            # Fallback: use the very first data point
+            session_open_price = float(close.iloc[0])
+            if session_open_price == 0:
+                return None
+
+        # Trim to last 24 UTC hours
+        now_utc = datetime.now(utc)
+        cutoff = now_utc - timedelta(hours=24)
 
         points: list[tuple[str, float]] = []
         for ts, val in close.items():
-            pct = round(((float(val) / base) - 1) * 100, 2)
-            time_label = ts.strftime("%H:%M")
+            ts_utc = ts.astimezone(utc)
+            if ts_utc < cutoff:
+                continue
+            pct = round(((float(val) / session_open_price) - 1) * 100, 2)
+            time_label = ts_utc.strftime("%H:%M")
             points.append((time_label, pct))
 
-        return points
+        return points if points else None
     except Exception as exc:
-        logger.warning("Intraday fetch failed for %s: %s", symbol, exc)
+        logger.warning("Intraday 24h fetch failed for %s: %s", symbol, exc)
         return None
 
 
 async def get_comparison_data() -> list[dict[str, Any]]:
     """
-    Returns a flat list ready for a LineChart:
-      [{time: "09:30", US500: 0, FR40: 0.1, ...}, ...]
+    24h Follow-the-Sun comparison for LineChart.
 
-    Each value = % change from that index's first data point of the day.
+    Returns a flat array sorted by UTC time:
+      [{time: "00:15", JP225: 0.3}, {time: "09:00", FR40: 0, DE40: 0}, ...]
+
+    - Each index's 0% = its own session-open price.
+    - Axis covers 24 UTC hours so Asia → Europe → USA sessions are visible.
+    - null when an index has no data at that timestamp.
     """
     loop = asyncio.get_running_loop()
     tasks = {
-        sym: loop.run_in_executor(_executor, _fetch_intraday_series, sym)
+        sym: loop.run_in_executor(_executor, _fetch_intraday_24h, sym)
         for sym in INDICES
     }
 
-    # Await all in parallel
     raw: dict[str, Optional[list[tuple[str, float]]]] = {}
     for sym, task in tasks.items():
         raw[sym] = await task
 
-    # Merge into a unified time axis
-    # Collect all timestamps across all indices
+    # Merge all indices onto one UTC time axis
     time_set: dict[str, dict[str, float]] = {}
     for sym, points in raw.items():
         if points is None:
@@ -165,13 +199,12 @@ async def get_comparison_data() -> list[dict[str, Any]]:
     if not time_set:
         return []
 
-    # Sort by time and build the final array
     all_keys = sorted({k for row in time_set.values() for k in row})
     result: list[dict[str, Any]] = []
     for t in sorted(time_set.keys()):
         row: dict[str, Any] = {"time": t}
         for key in all_keys:
-            row[key] = time_set[t].get(key)  # None if market not open yet
+            row[key] = time_set[t].get(key)
         result.append(row)
 
     return result
