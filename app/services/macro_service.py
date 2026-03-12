@@ -208,3 +208,152 @@ async def get_comparison_data() -> list[dict[str, Any]]:
         result.append(row)
 
     return result
+
+
+# ── Commodities ───────────────────────────────────────────────────
+# CME/NYMEX futures trade nearly 24h (Sun 18:00 – Fri 17:00 ET).
+
+COMMODITIES = {
+    "GC=F":  {"name": "Gold",        "unit": "USD/oz"},
+    "BZ=F":  {"name": "Brent Oil",   "unit": "USD/bbl"},
+    "NG=F":  {"name": "Natural Gas",  "unit": "USD/MMBtu"},
+    "SI=F":  {"name": "Silver",      "unit": "USD/oz"},
+}
+
+_COMMODITY_KEYS: dict[str, str] = {
+    "GC=F": "GOLD",
+    "BZ=F": "BRENT",
+    "NG=F": "NATGAS",
+    "SI=F": "SILVER",
+}
+
+
+def _fetch_single_commodity(symbol: str) -> dict[str, Any]:
+    """Blocking: fetch one commodity's price + daily change."""
+    meta = COMMODITIES[symbol]
+    try:
+        ticker = yf.Ticker(symbol)
+        fi = ticker.fast_info
+        price = float(fi["lastPrice"])
+        prev_close = float(fi["previousClose"])
+        change = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+
+        # CME futures: open weekdays, closed Sat and most of Sun
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        wd = now_et.weekday()
+        is_open = wd < 5 or (wd == 6 and now_et.hour >= 18)
+
+        return {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "price": round(price, 2),
+            "previous_close": round(prev_close, 2),
+            "change": change,
+            "change_pct": change_pct,
+            "is_open": is_open,
+        }
+    except Exception as exc:
+        logger.warning("Failed to fetch commodity %s: %s", symbol, exc)
+        return {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "price": None,
+            "previous_close": None,
+            "change": None,
+            "change_pct": None,
+            "is_open": False,
+            "error": str(exc),
+        }
+
+
+async def get_commodities_data() -> list[dict[str, Any]]:
+    """Fetch all commodity snapshots in parallel."""
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(_executor, _fetch_single_commodity, sym)
+        for sym in COMMODITIES
+    ]
+    results = await asyncio.gather(*tasks)
+    return list(results)
+
+
+# ── Commodities 24h comparison (same format as indices) ───────────
+
+def _fetch_commodity_intraday(symbol: str) -> Optional[list[tuple[str, float]]]:
+    """Fetch 24h intraday for a commodity, normalised to 0% at first point."""
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="2d", interval="15m")
+        if hist is None or hist.empty:
+            return None
+
+        close = hist["Close"].dropna()
+        if close.empty:
+            return None
+
+        utc = ZoneInfo("UTC")
+        now_utc = datetime.now(utc)
+        cutoff = now_utc - timedelta(hours=24)
+
+        # Base = first price within the 24h window
+        base: Optional[float] = None
+        points: list[tuple[str, float]] = []
+        for ts, val in close.items():
+            ts_utc = ts.astimezone(utc)
+            if ts_utc < cutoff:
+                continue
+            v = float(val)
+            if base is None:
+                base = v
+            if base == 0:
+                return None
+            pct = round(((v / base) - 1) * 100, 2)
+            points.append((ts_utc.strftime("%H:%M"), pct))
+
+        return points if points else None
+    except Exception as exc:
+        logger.warning("Commodity intraday fetch failed for %s: %s", symbol, exc)
+        return None
+
+
+async def get_commodities_comparison() -> list[dict[str, Any]]:
+    """
+    24h commodity comparison for LineChart — same flat format as indices.
+
+    [{time: "00:15", GOLD: 0.1, BRENT: -0.3, ...}, ...]
+    """
+    loop = asyncio.get_running_loop()
+    tasks = {
+        sym: loop.run_in_executor(_executor, _fetch_commodity_intraday, sym)
+        for sym in COMMODITIES
+    }
+
+    raw: dict[str, Optional[list[tuple[str, float]]]] = {}
+    for sym, task in tasks.items():
+        raw[sym] = await task
+
+    time_set: dict[str, dict[str, float]] = {}
+    for sym, points in raw.items():
+        if points is None:
+            continue
+        key = _COMMODITY_KEYS[sym]
+        for t, pct in points:
+            if t not in time_set:
+                time_set[t] = {}
+            time_set[t][key] = pct
+
+    if not time_set:
+        return []
+
+    all_keys = sorted({k for row in time_set.values() for k in row})
+    result: list[dict[str, Any]] = []
+    for t in sorted(time_set.keys()):
+        row: dict[str, Any] = {"time": t}
+        for key in all_keys:
+            row[key] = time_set[t].get(key)
+        result.append(row)
+
+    return result
