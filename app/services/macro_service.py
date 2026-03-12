@@ -1,7 +1,8 @@
 """
-Lightweight world-indices service — replaces OpenBB macro endpoints.
+Lightweight world-indices & commodities service.
 
-Uses yfinance to fetch index data for S&P 500, Nasdaq, CAC 40, DAX, Nikkei.
+Uses yfinance for S&P 500, Nasdaq, CAC 40, DAX, Nikkei, Gold, Brent, NatGas, Silver, DXY.
+Includes a 60-second non-blocking TTL cache and closed-market last-close persistence.
 """
 
 import asyncio
@@ -13,36 +14,59 @@ import yfinance as yf
 
 from app.core.logging import logger
 
-_executor = ThreadPoolExecutor(max_workers=3)
+_executor = ThreadPoolExecutor(max_workers=5)
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+
+# ── Lightweight TTL cache (60s, non-blocking) ─────────────────────
+_CACHE_TTL = 60  # seconds
+_cache: dict[str, tuple[float, Any]] = {}
+
+
+def _cache_get(key: str) -> Optional[Any]:
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    ts, data = entry
+    if (datetime.now(timezone.utc).timestamp() - ts) > _CACHE_TTL:
+        return None
+    return data
+
+
+def _cache_set(key: str, data: Any) -> None:
+    _cache[key] = (datetime.now(timezone.utc).timestamp(), data)
+
 
 # ── Index registry ────────────────────────────────────────────────
 INDICES = {
-    "^GSPC":  {"name": "S&P 500",  "exchange": "NYSE",    "tz": "America/New_York",  "open": time(9, 30), "close": time(16, 0)},
-    "^NDX":   {"name": "Nasdaq 100", "exchange": "NASDAQ", "tz": "America/New_York",  "open": time(9, 30), "close": time(16, 0)},
-    "^FCHI":  {"name": "CAC 40",   "exchange": "Euronext", "tz": "Europe/Paris",      "open": time(9, 0),  "close": time(17, 30)},
-    "^GDAXI": {"name": "DAX",      "exchange": "XETRA",   "tz": "Europe/Berlin",     "open": time(9, 0),  "close": time(17, 30)},
-    "^N225":  {"name": "Nikkei 225", "exchange": "TSE",    "tz": "Asia/Tokyo",        "open": time(9, 0),  "close": time(15, 0)},
+    "^GSPC":  {"name": "S&P 500",    "exchange": "NYSE",    "tz": "America/New_York", "open": time(9, 30), "close": time(16, 0)},
+    "^NDX":   {"name": "Nasdaq 100", "exchange": "NASDAQ",  "tz": "America/New_York", "open": time(9, 30), "close": time(16, 0)},
+    "^FCHI":  {"name": "CAC 40",     "exchange": "Euronext", "tz": "Europe/Paris",     "open": time(9, 0),  "close": time(17, 30)},
+    "^GDAXI": {"name": "DAX",        "exchange": "XETRA",   "tz": "Europe/Berlin",    "open": time(9, 0),  "close": time(17, 30)},
+    "^N225":  {"name": "Nikkei 225", "exchange": "TSE",     "tz": "Asia/Tokyo",       "open": time(9, 0),  "close": time(15, 0)},
 }
 
 
 def _is_market_open(tz_name: str, open_t: time, close_t: time) -> bool:
     """Check if a market is currently open (weekday + within trading hours)."""
-    try:
-        from zoneinfo import ZoneInfo
-    except ImportError:
-        from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
-
     now = datetime.now(ZoneInfo(tz_name))
-    # Weekends are closed (Monday=0 .. Sunday=6)
     if now.weekday() >= 5:
         return False
     current = now.time()
     return open_t <= current <= close_t
 
 
+# In-memory last-known prices so closed markets still show a line
+_last_known: dict[str, dict[str, Any]] = {}
+
+
 def _fetch_single_index(symbol: str) -> dict[str, Any]:
     """Blocking: fetch one index's current price + previous close."""
     meta = INDICES[symbol]
+    is_open = _is_market_open(meta["tz"], meta["open"], meta["close"])
     try:
         ticker = yf.Ticker(symbol)
         fi = ticker.fast_info
@@ -51,9 +75,7 @@ def _fetch_single_index(symbol: str) -> dict[str, Any]:
         change = round(price - prev_close, 2)
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
 
-        is_open = _is_market_open(meta["tz"], meta["open"], meta["close"])
-
-        return {
+        result = {
             "symbol": symbol,
             "name": meta["name"],
             "exchange": meta["exchange"],
@@ -63,8 +85,13 @@ def _fetch_single_index(symbol: str) -> dict[str, Any]:
             "change_pct": change_pct,
             "is_open": is_open,
         }
+        _last_known[symbol] = result
+        return result
     except Exception as exc:
         logger.warning("Failed to fetch index %s: %s", symbol, exc)
+        cached = _last_known.get(symbol)
+        if cached:
+            return {**cached, "is_open": is_open}
         return {
             "symbol": symbol,
             "name": meta["name"],
@@ -73,30 +100,29 @@ def _fetch_single_index(symbol: str) -> dict[str, Any]:
             "previous_close": None,
             "change": None,
             "change_pct": None,
-            "is_open": False,
+            "is_open": is_open,
             "error": str(exc),
         }
 
 
 async def get_world_indices() -> list[dict[str, Any]]:
-    """Fetch all world indices in parallel."""
+    """Fetch all world indices in parallel (60s TTL cache)."""
+    cached = _cache_get("world_indices")
+    if cached is not None:
+        return cached
+
     loop = asyncio.get_running_loop()
     tasks = [
         loop.run_in_executor(_executor, _fetch_single_index, sym)
         for sym in INDICES
     ]
-    results = await asyncio.gather(*tasks)
-    return list(results)
+    results = list(await asyncio.gather(*tasks))
+    _cache_set("world_indices", results)
+    return results
 
 
 # ── 24h Follow-the-Sun comparison (Base 0 per session open) ───────
 
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
-
-# Short labels for the LineChart
 _CHART_KEYS: dict[str, str] = {
     "^GSPC":  "US500",
     "^NDX":   "NDX100",
@@ -111,8 +137,6 @@ def _fetch_intraday_24h(symbol: str) -> Optional[list[tuple[str, float]]]:
     Fetch the last 2 trading days at 15-min intervals, trim to the most
     recent 24 UTC hours, and normalise each index to 0% at its own
     session-open price.
-
-    Returns list of (UTC "HH:MM", pct_change) sorted chronologically.
     """
     meta = INDICES[symbol]
     try:
@@ -125,7 +149,6 @@ def _fetch_intraday_24h(symbol: str) -> Optional[list[tuple[str, float]]]:
         if close.empty:
             return None
 
-        # Convert index to UTC for a unified axis
         utc = ZoneInfo("UTC")
         local_tz = ZoneInfo(meta["tz"])
         open_time = meta["open"]
@@ -140,7 +163,6 @@ def _fetch_intraday_24h(symbol: str) -> Optional[list[tuple[str, float]]]:
                 break
 
         if session_open_price is None or session_open_price == 0:
-            # Fallback: use the very first data point
             session_open_price = float(close.iloc[0])
             if session_open_price == 0:
                 return None
@@ -155,8 +177,7 @@ def _fetch_intraday_24h(symbol: str) -> Optional[list[tuple[str, float]]]:
             if ts_utc < cutoff:
                 continue
             pct = round(((float(val) / session_open_price) - 1) * 100, 2)
-            time_label = ts_utc.strftime("%H:%M")
-            points.append((time_label, pct))
+            points.append((ts_utc.strftime("%H:%M"), pct))
 
         return points if points else None
     except Exception as exc:
@@ -164,33 +185,16 @@ def _fetch_intraday_24h(symbol: str) -> Optional[list[tuple[str, float]]]:
         return None
 
 
-async def get_comparison_data() -> list[dict[str, Any]]:
-    """
-    24h Follow-the-Sun comparison for LineChart.
-
-    Returns a flat array sorted by UTC time:
-      [{time: "00:15", JP225: 0.3}, {time: "09:00", FR40: 0, DE40: 0}, ...]
-
-    - Each index's 0% = its own session-open price.
-    - Axis covers 24 UTC hours so Asia → Europe → USA sessions are visible.
-    - null when an index has no data at that timestamp.
-    """
-    loop = asyncio.get_running_loop()
-    tasks = {
-        sym: loop.run_in_executor(_executor, _fetch_intraday_24h, sym)
-        for sym in INDICES
-    }
-
-    raw: dict[str, Optional[list[tuple[str, float]]]] = {}
-    for sym, task in tasks.items():
-        raw[sym] = await task
-
-    # Merge all indices onto one UTC time axis
+def _merge_to_flat_rows(
+    raw: dict[str, Optional[list[tuple[str, float]]]],
+    key_map: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Merge per-symbol point lists into flat [{time, KEY1, KEY2, ...}]."""
     time_set: dict[str, dict[str, float]] = {}
     for sym, points in raw.items():
         if points is None:
             continue
-        key = _CHART_KEYS[sym]
+        key = key_map[sym]
         for t, pct in points:
             if t not in time_set:
                 time_set[t] = {}
@@ -206,31 +210,73 @@ async def get_comparison_data() -> list[dict[str, Any]]:
         for key in all_keys:
             row[key] = time_set[t].get(key)
         result.append(row)
-
     return result
 
 
-# ── Commodities ───────────────────────────────────────────────────
+async def get_comparison_data() -> list[dict[str, Any]]:
+    """
+    24h Follow-the-Sun comparison for LineChart (60s TTL cache).
+
+    [{time: "00:15", JP225: 0.3}, {time: "09:00", FR40: 0, DE40: 0}, ...]
+    """
+    cached = _cache_get("indices_comparison")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    tasks = {
+        sym: loop.run_in_executor(_executor, _fetch_intraday_24h, sym)
+        for sym in INDICES
+    }
+    raw: dict[str, Optional[list[tuple[str, float]]]] = {}
+    for sym, task in tasks.items():
+        raw[sym] = await task
+
+    result = _merge_to_flat_rows(raw, _CHART_KEYS)
+    _cache_set("indices_comparison", result)
+    return result
+
+
+# ── Commodities + DXY ─────────────────────────────────────────────
 # CME/NYMEX futures trade nearly 24h (Sun 18:00 – Fri 17:00 ET).
 
 COMMODITIES = {
-    "GC=F":  {"name": "Gold",        "unit": "USD/oz"},
-    "BZ=F":  {"name": "Brent Oil",   "unit": "USD/bbl"},
-    "NG=F":  {"name": "Natural Gas",  "unit": "USD/MMBtu"},
-    "SI=F":  {"name": "Silver",      "unit": "USD/oz"},
+    "GC=F":     {"name": "Gold",         "unit": "USD/oz"},
+    "BZ=F":     {"name": "Brent Oil",    "unit": "USD/bbl"},
+    "NG=F":     {"name": "Natural Gas",  "unit": "USD/MMBtu"},
+    "SI=F":     {"name": "Silver",       "unit": "USD/oz"},
+    "DX-Y.NYB": {"name": "Dollar Index", "unit": "Index"},
 }
 
 _COMMODITY_KEYS: dict[str, str] = {
-    "GC=F": "GOLD",
-    "BZ=F": "BRENT",
-    "NG=F": "NATGAS",
-    "SI=F": "SILVER",
+    "GC=F":     "GOLD",
+    "BZ=F":     "BRENT",
+    "NG=F":     "NATGAS",
+    "SI=F":     "SILVER",
+    "DX-Y.NYB": "DXY",
 }
+
+_last_known_commodity: dict[str, dict[str, Any]] = {}
+
+
+def _is_cme_open() -> bool:
+    """CME/NYMEX futures: Sun 18:00 ET – Fri 17:00 ET."""
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    wd = now_et.weekday()
+    h = now_et.hour
+    if wd == 5:
+        return False
+    if wd == 6:
+        return h >= 18
+    if wd == 4:
+        return h < 17
+    return not (h == 17)
 
 
 def _fetch_single_commodity(symbol: str) -> dict[str, Any]:
     """Blocking: fetch one commodity's price + daily change."""
     meta = COMMODITIES[symbol]
+    is_open = _is_cme_open()
     try:
         ticker = yf.Ticker(symbol)
         fi = ticker.fast_info
@@ -239,12 +285,7 @@ def _fetch_single_commodity(symbol: str) -> dict[str, Any]:
         change = round(price - prev_close, 2)
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
 
-        # CME futures: open weekdays, closed Sat and most of Sun
-        now_et = datetime.now(ZoneInfo("America/New_York"))
-        wd = now_et.weekday()
-        is_open = wd < 5 or (wd == 6 and now_et.hour >= 18)
-
-        return {
+        result = {
             "symbol": symbol,
             "name": meta["name"],
             "unit": meta["unit"],
@@ -254,8 +295,13 @@ def _fetch_single_commodity(symbol: str) -> dict[str, Any]:
             "change_pct": change_pct,
             "is_open": is_open,
         }
+        _last_known_commodity[symbol] = result
+        return result
     except Exception as exc:
         logger.warning("Failed to fetch commodity %s: %s", symbol, exc)
+        cached = _last_known_commodity.get(symbol)
+        if cached:
+            return {**cached, "is_open": is_open}
         return {
             "symbol": symbol,
             "name": meta["name"],
@@ -264,20 +310,25 @@ def _fetch_single_commodity(symbol: str) -> dict[str, Any]:
             "previous_close": None,
             "change": None,
             "change_pct": None,
-            "is_open": False,
+            "is_open": is_open,
             "error": str(exc),
         }
 
 
 async def get_commodities_data() -> list[dict[str, Any]]:
-    """Fetch all commodity snapshots in parallel."""
+    """Fetch all commodity + DXY snapshots in parallel (60s TTL cache)."""
+    cached = _cache_get("commodities")
+    if cached is not None:
+        return cached
+
     loop = asyncio.get_running_loop()
     tasks = [
         loop.run_in_executor(_executor, _fetch_single_commodity, sym)
         for sym in COMMODITIES
     ]
-    results = await asyncio.gather(*tasks)
-    return list(results)
+    results = list(await asyncio.gather(*tasks))
+    _cache_set("commodities", results)
+    return results
 
 
 # ── Commodities 24h comparison (same format as indices) ───────────
@@ -298,7 +349,6 @@ def _fetch_commodity_intraday(symbol: str) -> Optional[list[tuple[str, float]]]:
         now_utc = datetime.now(utc)
         cutoff = now_utc - timedelta(hours=24)
 
-        # Base = first price within the 24h window
         base: Optional[float] = None
         points: list[tuple[str, float]] = []
         for ts, val in close.items():
@@ -321,39 +371,23 @@ def _fetch_commodity_intraday(symbol: str) -> Optional[list[tuple[str, float]]]:
 
 async def get_commodities_comparison() -> list[dict[str, Any]]:
     """
-    24h commodity comparison for LineChart — same flat format as indices.
+    24h commodity + DXY comparison for LineChart (60s TTL cache).
 
-    [{time: "00:15", GOLD: 0.1, BRENT: -0.3, ...}, ...]
+    [{time: "00:15", GOLD: 0.1, BRENT: -0.3, DXY: 0.05, ...}, ...]
     """
+    cached = _cache_get("commodities_comparison")
+    if cached is not None:
+        return cached
+
     loop = asyncio.get_running_loop()
     tasks = {
         sym: loop.run_in_executor(_executor, _fetch_commodity_intraday, sym)
         for sym in COMMODITIES
     }
-
     raw: dict[str, Optional[list[tuple[str, float]]]] = {}
     for sym, task in tasks.items():
         raw[sym] = await task
 
-    time_set: dict[str, dict[str, float]] = {}
-    for sym, points in raw.items():
-        if points is None:
-            continue
-        key = _COMMODITY_KEYS[sym]
-        for t, pct in points:
-            if t not in time_set:
-                time_set[t] = {}
-            time_set[t][key] = pct
-
-    if not time_set:
-        return []
-
-    all_keys = sorted({k for row in time_set.values() for k in row})
-    result: list[dict[str, Any]] = []
-    for t in sorted(time_set.keys()):
-        row: dict[str, Any] = {"time": t}
-        for key in all_keys:
-            row[key] = time_set[t].get(key)
-        result.append(row)
-
+    result = _merge_to_flat_rows(raw, _COMMODITY_KEYS)
+    _cache_set("commodities_comparison", result)
     return result
