@@ -391,3 +391,138 @@ async def get_commodities_comparison() -> list[dict[str, Any]]:
     result = _merge_to_flat_rows(raw, _COMMODITY_KEYS)
     _cache_set("commodities_comparison", result)
     return result
+
+
+# ── Risk indicators (VIX + US 10Y) ───────────────────────────────
+
+RISK_TICKERS = {
+    "^VIX": {"name": "VIX (Volatility)", "unit": "pts"},
+    "^TNX": {"name": "US 10Y Yield",     "unit": "%"},
+}
+
+_RISK_KEYS: dict[str, str] = {
+    "^VIX": "VIX",
+    "^TNX": "US10Y",
+}
+
+_last_known_risk: dict[str, dict[str, Any]] = {}
+
+
+def _fetch_single_risk(symbol: str) -> dict[str, Any]:
+    """Blocking: fetch one risk indicator's value + daily change."""
+    meta = RISK_TICKERS[symbol]
+    is_open = _is_market_open("America/New_York", time(9, 30), time(16, 0))
+    try:
+        ticker = yf.Ticker(symbol)
+        fi = ticker.fast_info
+        price = float(fi["lastPrice"])
+        prev_close = float(fi["previousClose"])
+        change = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+
+        result = {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "value": round(price, 2),
+            "previous_close": round(prev_close, 2),
+            "change": change,
+            "change_pct": change_pct,
+            "is_open": is_open,
+        }
+        _last_known_risk[symbol] = result
+        return result
+    except Exception as exc:
+        logger.warning("Failed to fetch risk indicator %s: %s", symbol, exc)
+        cached = _last_known_risk.get(symbol)
+        if cached:
+            return {**cached, "is_open": is_open}
+        return {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "value": None,
+            "previous_close": None,
+            "change": None,
+            "change_pct": None,
+            "is_open": is_open,
+            "error": str(exc),
+        }
+
+
+async def get_risk_data() -> list[dict[str, Any]]:
+    """Fetch VIX + US10Y snapshots in parallel (60s TTL cache)."""
+    cached = _cache_get("risk")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(_executor, _fetch_single_risk, sym)
+        for sym in RISK_TICKERS
+    ]
+    results = list(await asyncio.gather(*tasks))
+    _cache_set("risk", results)
+    return results
+
+
+# ── Risk 24h comparison ───────────────────────────────────────────
+
+def _fetch_risk_intraday(symbol: str) -> Optional[list[tuple[str, float]]]:
+    """Fetch 24h intraday for a risk indicator, normalised to 0% at first point."""
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="2d", interval="15m")
+        if hist is None or hist.empty:
+            return None
+
+        close = hist["Close"].dropna()
+        if close.empty:
+            return None
+
+        utc = ZoneInfo("UTC")
+        now_utc = datetime.now(utc)
+        cutoff = now_utc - timedelta(hours=24)
+
+        base: Optional[float] = None
+        points: list[tuple[str, float]] = []
+        for ts, val in close.items():
+            ts_utc = ts.astimezone(utc)
+            if ts_utc < cutoff:
+                continue
+            v = float(val)
+            if base is None:
+                base = v
+            if base == 0:
+                return None
+            pct = round(((v / base) - 1) * 100, 2)
+            points.append((ts_utc.strftime("%H:%M"), pct))
+
+        return points if points else None
+    except Exception as exc:
+        logger.warning("Risk intraday fetch failed for %s: %s", symbol, exc)
+        return None
+
+
+async def get_risk_comparison() -> list[dict[str, Any]]:
+    """
+    24h risk comparison for LineChart (60s TTL cache).
+
+    [{time: "09:45", VIX: 1.2, US10Y: -0.3}, ...]
+    """
+    cached = _cache_get("risk_comparison")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    tasks = {
+        sym: loop.run_in_executor(_executor, _fetch_risk_intraday, sym)
+        for sym in RISK_TICKERS
+    }
+    raw: dict[str, Optional[list[tuple[str, float]]]] = {}
+    for sym, task in tasks.items():
+        raw[sym] = await task
+
+    result = _merge_to_flat_rows(raw, _RISK_KEYS)
+    _cache_set("risk_comparison", result)
+    return result

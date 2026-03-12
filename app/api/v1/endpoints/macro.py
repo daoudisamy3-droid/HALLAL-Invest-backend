@@ -6,6 +6,8 @@ from app.services.macro_service import (
     get_comparison_data,
     get_commodities_data,
     get_commodities_comparison,
+    get_risk_data,
+    get_risk_comparison,
 )
 
 router = APIRouter()
@@ -49,3 +51,23 @@ async def commodities():
 )
 async def commodities_comparison():
     return await get_commodities_comparison()
+
+
+@router.get(
+    "/macro/risk",
+    summary="Systemic risk indicators",
+    description="VIX (volatility) and US 10Y yield — raw values, daily change, and market status.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def risk():
+    return await get_risk_data()
+
+
+@router.get(
+    "/macro/risk/comparison",
+    summary="Risk indicators 24h comparison (LineChart-ready)",
+    description="Flat array of {time, VIX, US10Y} on a UTC 24h axis. Base 0% at first data point.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def risk_comparison():
+    return await get_risk_comparison()
