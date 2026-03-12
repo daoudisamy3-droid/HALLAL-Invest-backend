@@ -408,6 +408,19 @@ _RISK_KEYS: dict[str, str] = {
 _last_known_risk: dict[str, dict[str, Any]] = {}
 
 
+def _risk_signal(symbol: str, value: Optional[float], change_pct: Optional[float]) -> str:
+    """Compute a human-readable risk signal."""
+    if symbol == "^VIX":
+        if value is not None and value > 25:
+            return "\U0001f534 VIGILANCE"
+        return "\U0001f7e2 STABLE"
+    if symbol == "^TNX":
+        if change_pct is not None and abs(change_pct) > 1:
+            return "\u26a0\ufe0f TENSION TAUX"
+        return "OK"
+    return "N/A"
+
+
 def _fetch_single_risk(symbol: str) -> dict[str, Any]:
     """Blocking: fetch one risk indicator's value + daily change."""
     meta = RISK_TICKERS[symbol]
@@ -420,6 +433,8 @@ def _fetch_single_risk(symbol: str) -> dict[str, Any]:
         change = round(price - prev_close, 2)
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
 
+        signal = _risk_signal(symbol, round(price, 2), change_pct)
+
         result = {
             "symbol": symbol,
             "name": meta["name"],
@@ -428,6 +443,7 @@ def _fetch_single_risk(symbol: str) -> dict[str, Any]:
             "previous_close": round(prev_close, 2),
             "change": change,
             "change_pct": change_pct,
+            "signal": signal,
             "is_open": is_open,
         }
         _last_known_risk[symbol] = result
@@ -445,6 +461,7 @@ def _fetch_single_risk(symbol: str) -> dict[str, Any]:
             "previous_close": None,
             "change": None,
             "change_pct": None,
+            "signal": "N/A",
             "is_open": is_open,
             "error": str(exc),
         }
