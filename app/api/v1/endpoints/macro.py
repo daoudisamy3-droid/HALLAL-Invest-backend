@@ -18,8 +18,8 @@ async def world_indices():
 
 @router.get(
     "/macro/comparison",
-    summary="Base-100 normalised comparison (24h)",
-    description="Returns intraday data points normalised to base 100 for cross-index comparison.",
+    summary="Base-0 intraday comparison (LineChart-ready)",
+    description="Flat array of {time, US500, NDX100, FR40, DE40, JP225} with % change from day open.",
     dependencies=[Depends(rate_limit_dependency)],
 )
 async def comparison():

@@ -89,18 +89,26 @@ async def get_world_indices() -> list[dict[str, Any]]:
     return list(results)
 
 
-# ── Base-100 comparison (24h) ─────────────────────────────────────
+# ── Chart-ready comparison (Base 0 = % change from day open) ──────
 
-def _fetch_comparison_series(symbol: str) -> Optional[dict[str, Any]]:
-    """
-    Fetch intraday data for the last 24h, normalise to base 100.
+# Short labels for the LineChart
+_CHART_KEYS: dict[str, str] = {
+    "^GSPC":  "US500",
+    "^NDX":   "NDX100",
+    "^FCHI":  "FR40",
+    "^GDAXI": "DE40",
+    "^N225":  "JP225",
+}
 
-    Uses 15m intervals over the last 2 trading days to ensure coverage.
+
+def _fetch_intraday_series(symbol: str) -> Optional[list[tuple[str, float]]]:
     """
-    meta = INDICES[symbol]
+    Fetch today's intraday 15-min closes for one index.
+    Returns list of (HH:MM, pct_change_from_open) or None.
+    """
     try:
         ticker = yf.Ticker(symbol)
-        hist = ticker.history(period="2d", interval="15m")
+        hist = ticker.history(period="1d", interval="15m")
         if hist is None or hist.empty:
             return None
 
@@ -112,33 +120,58 @@ def _fetch_comparison_series(symbol: str) -> Optional[dict[str, Any]]:
         if base == 0:
             return None
 
-        points = []
+        points: list[tuple[str, float]] = []
         for ts, val in close.items():
-            normalised = round((float(val) / base) * 100, 4)
-            points.append({
-                "timestamp": ts.isoformat(),
-                "value": normalised,
-            })
+            pct = round(((float(val) / base) - 1) * 100, 2)
+            time_label = ts.strftime("%H:%M")
+            points.append((time_label, pct))
 
-        return {
-            "symbol": symbol,
-            "name": meta["name"],
-            "base_price": round(base, 2),
-            "latest_price": round(float(close.iloc[-1]), 2),
-            "performance_pct": round(((float(close.iloc[-1]) / base) - 1) * 100, 2),
-            "points": points,
-        }
+        return points
     except Exception as exc:
-        logger.warning("Comparison fetch failed for %s: %s", symbol, exc)
+        logger.warning("Intraday fetch failed for %s: %s", symbol, exc)
         return None
 
 
 async def get_comparison_data() -> list[dict[str, Any]]:
-    """Fetch base-100 normalised series for all indices (parallel)."""
+    """
+    Returns a flat list ready for a LineChart:
+      [{time: "09:30", US500: 0, FR40: 0.1, ...}, ...]
+
+    Each value = % change from that index's first data point of the day.
+    """
     loop = asyncio.get_running_loop()
-    tasks = [
-        loop.run_in_executor(_executor, _fetch_comparison_series, sym)
+    tasks = {
+        sym: loop.run_in_executor(_executor, _fetch_intraday_series, sym)
         for sym in INDICES
-    ]
-    results = await asyncio.gather(*tasks)
-    return [r for r in results if r is not None]
+    }
+
+    # Await all in parallel
+    raw: dict[str, Optional[list[tuple[str, float]]]] = {}
+    for sym, task in tasks.items():
+        raw[sym] = await task
+
+    # Merge into a unified time axis
+    # Collect all timestamps across all indices
+    time_set: dict[str, dict[str, float]] = {}
+    for sym, points in raw.items():
+        if points is None:
+            continue
+        key = _CHART_KEYS[sym]
+        for t, pct in points:
+            if t not in time_set:
+                time_set[t] = {}
+            time_set[t][key] = pct
+
+    if not time_set:
+        return []
+
+    # Sort by time and build the final array
+    all_keys = sorted({k for row in time_set.values() for k in row})
+    result: list[dict[str, Any]] = []
+    for t in sorted(time_set.keys()):
+        row: dict[str, Any] = {"time": t}
+        for key in all_keys:
+            row[key] = time_set[t].get(key)  # None if market not open yet
+        result.append(row)
+
+    return result
