@@ -543,3 +543,267 @@ async def get_risk_comparison() -> list[dict[str, Any]]:
     result = _merge_to_flat_rows(raw, _RISK_KEYS)
     _cache_set("risk_comparison", result)
     return result
+
+
+# ── Energy sector (WTI, Heating Oil, Gasoline) ──────────────────
+
+ENERGY_TICKERS = {
+    "CL=F": {"name": "WTI Crude Oil",  "unit": "USD/bbl"},
+    "HO=F": {"name": "Heating Oil",    "unit": "USD/gal"},
+    "RB=F": {"name": "RBOB Gasoline",  "unit": "USD/gal"},
+}
+
+_ENERGY_KEYS: dict[str, str] = {
+    "CL=F": "WTI",
+    "HO=F": "HEAT_OIL",
+    "RB=F": "GASOLINE",
+}
+
+_last_known_energy: dict[str, dict[str, Any]] = {}
+
+
+def _fetch_single_energy(symbol: str) -> dict[str, Any]:
+    """Blocking: fetch one energy ticker's price + daily change."""
+    meta = ENERGY_TICKERS[symbol]
+    is_open = _is_cme_open()
+    try:
+        ticker = yf.Ticker(symbol)
+        fi = ticker.fast_info
+        price = float(fi["lastPrice"])
+        prev_close = float(fi["previousClose"])
+        change = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+
+        result = {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "price": round(price, 2),
+            "previous_close": round(prev_close, 2),
+            "change": change,
+            "change_pct": change_pct,
+            "is_open": is_open,
+        }
+        _last_known_energy[symbol] = result
+        return result
+    except Exception as exc:
+        logger.warning("Failed to fetch energy ticker %s: %s", symbol, exc)
+        cached = _last_known_energy.get(symbol)
+        if cached:
+            return {**cached, "is_open": is_open}
+        return {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "price": None,
+            "previous_close": None,
+            "change": None,
+            "change_pct": None,
+            "is_open": is_open,
+            "error": str(exc),
+        }
+
+
+async def get_energy_data() -> list[dict[str, Any]]:
+    """Fetch energy snapshots in parallel (60s TTL cache)."""
+    cached = _cache_get("energy")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(_executor, _fetch_single_energy, sym)
+        for sym in ENERGY_TICKERS
+    ]
+    results = list(await asyncio.gather(*tasks))
+    _cache_set("energy", results)
+    return results
+
+
+def _fetch_energy_intraday(symbol: str) -> Optional[list[tuple[str, float]]]:
+    """Fetch 24h intraday for an energy ticker, normalised to 0% at first point."""
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="2d", interval="15m")
+        if hist is None or hist.empty:
+            return None
+
+        close = hist["Close"].dropna()
+        if close.empty:
+            return None
+
+        utc = ZoneInfo("UTC")
+        now_utc = datetime.now(utc)
+        cutoff = now_utc - timedelta(hours=24)
+
+        base: Optional[float] = None
+        points: list[tuple[str, float]] = []
+        for ts, val in close.items():
+            ts_utc = ts.astimezone(utc)
+            if ts_utc < cutoff:
+                continue
+            v = float(val)
+            if base is None:
+                base = v
+            if base == 0:
+                return None
+            pct = round(((v / base) - 1) * 100, 2)
+            points.append((ts_utc.strftime("%H:%M"), pct))
+
+        return points if points else None
+    except Exception as exc:
+        logger.warning("Energy intraday fetch failed for %s: %s", symbol, exc)
+        return None
+
+
+async def get_energy_comparison() -> list[dict[str, Any]]:
+    """24h energy comparison for LineChart (60s TTL cache)."""
+    cached = _cache_get("energy_comparison")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    tasks = {
+        sym: loop.run_in_executor(_executor, _fetch_energy_intraday, sym)
+        for sym in ENERGY_TICKERS
+    }
+    raw: dict[str, Optional[list[tuple[str, float]]]] = {}
+    for sym, task in tasks.items():
+        raw[sym] = await task
+
+    result = _merge_to_flat_rows(raw, _ENERGY_KEYS)
+    _cache_set("energy_comparison", result)
+    return result
+
+
+# ── Logistics sector (Transport ETF, FedEx, Maersk, ZIM) ────────
+
+LOGISTICS_TICKERS = {
+    "IYT":   {"name": "Transport ETF (IYT)", "unit": "USD"},
+    "FDX":   {"name": "FedEx",               "unit": "USD"},
+    "AMKBY": {"name": "Maersk (ADR)",        "unit": "USD"},
+    "ZIM":   {"name": "ZIM Shipping",        "unit": "USD"},
+}
+
+_LOGISTICS_KEYS: dict[str, str] = {
+    "IYT":   "IYT",
+    "FDX":   "FDX",
+    "AMKBY": "MAERSK",
+    "ZIM":   "ZIM",
+}
+
+_last_known_logistics: dict[str, dict[str, Any]] = {}
+
+
+def _fetch_single_logistics(symbol: str) -> dict[str, Any]:
+    """Blocking: fetch one logistics ticker's price + daily change."""
+    meta = LOGISTICS_TICKERS[symbol]
+    is_open = _is_market_open("America/New_York", time(9, 30), time(16, 0))
+    try:
+        ticker = yf.Ticker(symbol)
+        fi = ticker.fast_info
+        price = float(fi["lastPrice"])
+        prev_close = float(fi["previousClose"])
+        change = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+
+        result = {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "price": round(price, 2),
+            "previous_close": round(prev_close, 2),
+            "change": change,
+            "change_pct": change_pct,
+            "is_open": is_open,
+        }
+        _last_known_logistics[symbol] = result
+        return result
+    except Exception as exc:
+        logger.warning("Failed to fetch logistics ticker %s: %s", symbol, exc)
+        cached = _last_known_logistics.get(symbol)
+        if cached:
+            return {**cached, "is_open": is_open}
+        return {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "price": None,
+            "previous_close": None,
+            "change": None,
+            "change_pct": None,
+            "is_open": is_open,
+            "error": str(exc),
+        }
+
+
+async def get_logistics_data() -> list[dict[str, Any]]:
+    """Fetch logistics snapshots in parallel (60s TTL cache)."""
+    cached = _cache_get("logistics")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(_executor, _fetch_single_logistics, sym)
+        for sym in LOGISTICS_TICKERS
+    ]
+    results = list(await asyncio.gather(*tasks))
+    _cache_set("logistics", results)
+    return results
+
+
+def _fetch_logistics_intraday(symbol: str) -> Optional[list[tuple[str, float]]]:
+    """Fetch 24h intraday for a logistics ticker, normalised to 0% at first point."""
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="2d", interval="15m")
+        if hist is None or hist.empty:
+            return None
+
+        close = hist["Close"].dropna()
+        if close.empty:
+            return None
+
+        utc = ZoneInfo("UTC")
+        now_utc = datetime.now(utc)
+        cutoff = now_utc - timedelta(hours=24)
+
+        base: Optional[float] = None
+        points: list[tuple[str, float]] = []
+        for ts, val in close.items():
+            ts_utc = ts.astimezone(utc)
+            if ts_utc < cutoff:
+                continue
+            v = float(val)
+            if base is None:
+                base = v
+            if base == 0:
+                return None
+            pct = round(((v / base) - 1) * 100, 2)
+            points.append((ts_utc.strftime("%H:%M"), pct))
+
+        return points if points else None
+    except Exception as exc:
+        logger.warning("Logistics intraday fetch failed for %s: %s", symbol, exc)
+        return None
+
+
+async def get_logistics_comparison() -> list[dict[str, Any]]:
+    """24h logistics comparison for LineChart (60s TTL cache)."""
+    cached = _cache_get("logistics_comparison")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    tasks = {
+        sym: loop.run_in_executor(_executor, _fetch_logistics_intraday, sym)
+        for sym in LOGISTICS_TICKERS
+    }
+    raw: dict[str, Optional[list[tuple[str, float]]]] = {}
+    for sym, task in tasks.items():
+        raw[sym] = await task
+
+    result = _merge_to_flat_rows(raw, _LOGISTICS_KEYS)
+    _cache_set("logistics_comparison", result)
+    return result

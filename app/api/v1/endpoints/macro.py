@@ -8,6 +8,10 @@ from app.services.macro_service import (
     get_commodities_comparison,
     get_risk_data,
     get_risk_comparison,
+    get_energy_data,
+    get_energy_comparison,
+    get_logistics_data,
+    get_logistics_comparison,
 )
 
 router = APIRouter()
@@ -71,3 +75,43 @@ async def risk():
 )
 async def risk_comparison():
     return await get_risk_comparison()
+
+
+@router.get(
+    "/macro/energy",
+    summary="Energy sector snapshot",
+    description="WTI Crude Oil, Heating Oil, RBOB Gasoline — price, change %, and market status.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def energy():
+    return await get_energy_data()
+
+
+@router.get(
+    "/macro/energy/comparison",
+    summary="Energy 24h comparison (LineChart-ready)",
+    description="Flat array of {time, WTI, HEAT_OIL, GASOLINE} on a UTC 24h axis. Base 0% at first data point.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def energy_comparison():
+    return await get_energy_comparison()
+
+
+@router.get(
+    "/macro/logistics",
+    summary="Logistics sector snapshot",
+    description="Transport ETF (IYT), FedEx, Maersk (ADR), ZIM Shipping — price, change %, and market status.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def logistics():
+    return await get_logistics_data()
+
+
+@router.get(
+    "/macro/logistics/comparison",
+    summary="Logistics 24h comparison (LineChart-ready)",
+    description="Flat array of {time, IYT, FDX, MAERSK, ZIM} on a UTC 24h axis. Base 0% at first data point.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def logistics_comparison():
+    return await get_logistics_comparison()
