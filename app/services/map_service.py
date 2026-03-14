@@ -36,11 +36,36 @@ def get_infrastructure_points() -> list[dict]:
 # ── Energy chokepoints (geopolitical) ────────────────────────────
 
 ENERGY_CHOKEPOINTS: list[dict] = [
-    {"id": "ck01", "name": "Détroit d'Ormuz",   "lat": 26.56, "lng": 56.25, "desc": "20% du pétrole mondial"},
-    {"id": "ck02", "name": "Détroit de Malacca", "lat": 1.43,  "lng": 102.89, "desc": "Hub Asie"},
-    {"id": "ck03", "name": "Canal de Suez",      "lat": 30.58, "lng": 32.34, "desc": "Route Europe-Asie"},
-    {"id": "ck04", "name": "Canal de Panama",    "lat": 9.14,  "lng": -79.72, "desc": "Route Amériques"},
-    {"id": "ck05", "name": "Bab el-Mandeb",      "lat": 12.58, "lng": 43.33, "desc": "Mer Rouge"},
+    {
+        "id": "ck01", "name": "Détroit d'Ormuz", "lat": 26.56, "lng": 56.25,
+        "desc": "20% du pétrole mondial",
+        "volume": "21M barils/j", "impact": "20% conso mondiale",
+        "proxy_ticker": "FRO", "proxy_name": "Frontline (Tankers)",
+    },
+    {
+        "id": "ck02", "name": "Détroit de Malacca", "lat": 1.43, "lng": 102.89,
+        "desc": "Hub Asie",
+        "volume": "16M barils/j", "impact": "Hub Asie",
+        "proxy_ticker": "CEO", "proxy_name": "CNOOC",
+    },
+    {
+        "id": "ck03", "name": "Canal de Suez", "lat": 30.58, "lng": 32.34,
+        "desc": "Route Europe-Asie",
+        "volume": "9M barils/j", "impact": "12% commerce mondial",
+        "proxy_ticker": "ZIM", "proxy_name": "ZIM Shipping",
+    },
+    {
+        "id": "ck04", "name": "Canal de Panama", "lat": 9.14, "lng": -79.72,
+        "desc": "Route Amériques",
+        "volume": "5% commerce global", "impact": "Route GNL (Gaz)",
+        "proxy_ticker": "LNG", "proxy_name": "Cheniere Energy",
+    },
+    {
+        "id": "ck05", "name": "Bab el-Mandeb", "lat": 12.58, "lng": 43.33,
+        "desc": "Mer Rouge",
+        "volume": "9M barils/j", "impact": "12% commerce mondial",
+        "proxy_ticker": "ZIM", "proxy_name": "ZIM Shipping",
+    },
 ]
 
 

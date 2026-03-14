@@ -14,6 +14,7 @@ from app.services.macro_service import (
     get_energy_table,
     get_logistics_data,
     get_logistics_comparison,
+    get_chokepoints_proxys,
 )
 
 router = APIRouter()
@@ -137,3 +138,13 @@ async def logistics():
 )
 async def logistics_comparison():
     return await get_logistics_comparison()
+
+
+@router.get(
+    "/macro/chokepoints/proxys",
+    summary="Chokepoint proxy tickers (live)",
+    description="Real-time price & change % for FRO (Ormuz), CEO (Malacca), ZIM (Suez/Bab el-Mandeb), LNG (Panama).",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def chokepoints_proxys():
+    return await get_chokepoints_proxys()

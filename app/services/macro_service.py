@@ -912,3 +912,73 @@ async def get_logistics_comparison() -> list[dict[str, Any]]:
     result = _merge_to_flat_rows(raw, _LOGISTICS_KEYS)
     _cache_set("logistics_comparison", result)
     return result
+
+
+# ── Chokepoints proxy tickers (FRO, CEO, ZIM, LNG) ──────────────
+
+_CHOKEPOINT_PROXYS = {
+    "FRO": {"name": "Frontline (Tankers)", "chokepoint": "Ormuz"},
+    "CEO": {"name": "CNOOC",              "chokepoint": "Malacca"},
+    "ZIM": {"name": "ZIM Shipping",       "chokepoint": "Suez / Bab el-Mandeb"},
+    "LNG": {"name": "Cheniere Energy",    "chokepoint": "Panama"},
+}
+
+_last_known_proxy: dict[str, dict[str, Any]] = {}
+
+
+def _fetch_single_proxy(symbol: str) -> dict[str, Any]:
+    """Blocking: fetch one chokepoint proxy ticker."""
+    meta = _CHOKEPOINT_PROXYS[symbol]
+    is_open = _is_market_open("America/New_York", time(9, 30), time(16, 0))
+    try:
+        ticker = yf.Ticker(symbol)
+        fi = ticker.fast_info
+        price = float(fi["lastPrice"])
+        prev_close = float(fi["previousClose"])
+        change = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+
+        result = {
+            "symbol": symbol,
+            "name": meta["name"],
+            "chokepoint": meta["chokepoint"],
+            "price": round(price, 2),
+            "previous_close": round(prev_close, 2),
+            "change": change,
+            "change_pct": change_pct,
+            "is_open": is_open,
+        }
+        _last_known_proxy[symbol] = result
+        return result
+    except Exception as exc:
+        logger.warning("Failed to fetch proxy ticker %s: %s", symbol, exc)
+        cached = _last_known_proxy.get(symbol)
+        if cached:
+            return {**cached, "is_open": is_open}
+        return {
+            "symbol": symbol,
+            "name": meta["name"],
+            "chokepoint": meta["chokepoint"],
+            "price": None,
+            "previous_close": None,
+            "change": None,
+            "change_pct": None,
+            "is_open": is_open,
+            "error": str(exc),
+        }
+
+
+async def get_chokepoints_proxys() -> list[dict[str, Any]]:
+    """Fetch chokepoint proxy tickers in parallel (60s TTL cache)."""
+    cached = _cache_get("chokepoints_proxys")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(_executor, _fetch_single_proxy, sym)
+        for sym in _CHOKEPOINT_PROXYS
+    ]
+    results = list(await asyncio.gather(*tasks))
+    _cache_set("chokepoints_proxys", results)
+    return results
