@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -184,36 +185,123 @@ def get_offshore() -> dict[str, Any]:
 
 
 # ── Facilities (massive unified layer, 15k+ points) ─────────────
+#
+# Priority order:
+#   1. OSM real data  (app/data/osm_energy_facilities.json)
+#   2. Generated data (app/data/layers/facilities.geojson)
+#   3. Empty FeatureCollection (never 500)
+
+_OSM_PATH = Path(__file__).resolve().parent.parent / "data" / "osm_energy_facilities.json"
+_GENERATED_PATH = _DATA_DIR / "facilities.geojson"
 
 _facilities_cache: dict[str, Any] | None = None
+_fetch_triggered = False
+
+
+def _osm_to_geojson(data: dict) -> dict[str, Any]:
+    """Convert our OSM JSON format to standard GeoJSON FeatureCollection."""
+    features = []
+    for i, f in enumerate(data.get("features", [])):
+        lat = f.get("lat")
+        lng = f.get("lng")
+        if lat is None or lng is None:
+            continue
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [lng, lat]},
+            "properties": {
+                "id": str(f.get("osm_id", f"osm_{i}")),
+                "name": f.get("name") or f"OSM {f.get('type', 'facility')} #{i + 1}",
+                "type": f.get("type", "onshore"),
+                "lat": lat,
+                "lng": lng,
+            },
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _try_load_osm() -> dict[str, Any] | None:
+    """Try loading real OSM data. Returns GeoJSON or None."""
+    try:
+        raw = _OSM_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        total = data.get("total", 0)
+        if total < 100:
+            logger.info("osm data too small (%d features), skipping", total)
+            return None
+        geojson = _osm_to_geojson(data)
+        logger.info("facilities: loaded %d real OSM features", len(geojson["features"]))
+        return geojson
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning("osm data error: %s", exc)
+        return None
+
+
+def _try_load_generated() -> dict[str, Any] | None:
+    """Try loading generated fallback data."""
+    try:
+        raw = _GENERATED_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict) and data.get("type") == "FeatureCollection":
+            logger.info("facilities: loaded %d generated features (%.1f MB)",
+                        len(data["features"]), len(raw) / 1_048_576)
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.warning("generated facilities error: %s", exc)
+    return None
+
+
+def _trigger_background_fetch() -> None:
+    """Trigger the OSM fetch script in a background subprocess."""
+    global _fetch_triggered
+    if _fetch_triggered:
+        return
+    _fetch_triggered = True
+
+    import subprocess
+    script = Path(__file__).resolve().parent.parent.parent / "scripts" / "fetch_osm_energy.py"
+    if not script.exists():
+        logger.warning("fetch script not found at %s", script)
+        return
+
+    logger.info("triggering background OSM fetch: %s", script)
+    try:
+        subprocess.Popen(
+            [sys.executable, str(script)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        logger.warning("background fetch failed to start: %s", exc)
 
 
 def get_facilities() -> dict[str, Any]:
     """
-    Load the massive facilities GeoJSON (15 000+ wells & platforms).
+    Load facilities data – OSM real data first, generated fallback second.
 
-    Uses permanent in-memory cache (static data). Never raises.
+    If neither file exists, triggers background OSM fetch and returns
+    empty FeatureCollection. Permanent in-memory cache. Never raises.
     """
     global _facilities_cache
     if _facilities_cache is not None:
         return _facilities_cache
 
-    path = _DATA_DIR / "facilities.geojson"
-    try:
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
-        if isinstance(data, dict) and data.get("type") == "FeatureCollection":
-            _facilities_cache = data
-            logger.info("facilities: loaded %d features (%.1f MB)",
-                        len(data["features"]), len(raw) / 1_048_576)
-            return _facilities_cache
-        logger.error("facilities: invalid GeoJSON structure")
-    except FileNotFoundError:
-        logger.warning("facilities: file not found at %s – run scripts/fetch_wells_data.py", path)
-    except json.JSONDecodeError as exc:
-        logger.error("facilities: corrupt JSON – %s", exc)
-    except Exception as exc:
-        logger.error("facilities: unexpected error – %s", exc)
+    # 1. Try real OSM data
+    result = _try_load_osm()
 
-    _facilities_cache = _EMPTY_FC
+    # 2. Fallback to generated dataset
+    if result is None:
+        result = _try_load_generated()
+
+    # 3. Nothing available: trigger background fetch, return empty
+    if result is None:
+        logger.warning("no facilities data available – run: python scripts/fetch_osm_energy.py")
+        _trigger_background_fetch()
+        result = _EMPTY_FC
+
+    _facilities_cache = result
     return _facilities_cache
