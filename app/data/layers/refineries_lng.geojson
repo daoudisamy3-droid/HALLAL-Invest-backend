@@ -1,0 +1,17 @@
+{"type":"FeatureCollection","features":[
+{"type":"Feature","geometry":{"type":"Point","coordinates":[70.00,22.47]},"properties":{"id":"r01","name":"Jamnagar Refinery","cap_kbpd":1240,"type":"refinery"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[126.57,37.56]},"properties":{"id":"r02","name":"SK Ulsan","cap_kbpd":840,"type":"refinery"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-95.38,29.76]},"properties":{"id":"r03","name":"Port Arthur Refinery","cap_kbpd":630,"type":"refinery"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[103.70,1.27]},"properties":{"id":"r04","name":"Jurong Island Complex","cap_kbpd":592,"type":"refinery"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[4.14,51.95]},"properties":{"id":"r05","name":"Pernis (Shell)","cap_kbpd":404,"type":"refinery"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[50.16,26.64]},"properties":{"id":"r06","name":"Ras Tanura Refinery","cap_kbpd":550,"type":"refinery"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[121.50,31.23]},"properties":{"id":"r07","name":"Sinopec Shanghai","cap_kbpd":480,"type":"refinery"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[136.90,35.08]},"properties":{"id":"r08","name":"JXTG Negishi","cap_kbpd":340,"type":"refinery"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-46.30,-23.96]},"properties":{"id":"r09","name":"REPLAN (Petrobras)","cap_kbpd":434,"type":"refinery"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[10.00,53.53]},"properties":{"id":"r10","name":"Hamburg Refinery","cap_kbpd":320,"type":"refinery"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-93.86,29.74]},"properties":{"id":"r11","name":"Sabine Pass LNG","cap_kbpd":300,"type":"lng_terminal"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[51.53,25.91]},"properties":{"id":"r12","name":"Ras Laffan LNG","cap_kbpd":1100,"type":"lng_terminal"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[130.78,-12.56]},"properties":{"id":"r13","name":"Ichthys LNG","cap_kbpd":180,"type":"lng_terminal"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[72.91,71.27]},"properties":{"id":"r14","name":"Yamal LNG","cap_kbpd":250,"type":"lng_terminal"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[7.15,4.42]},"properties":{"id":"r15","name":"Bonny Island LNG","cap_kbpd":320,"type":"lng_terminal"}}
+]}

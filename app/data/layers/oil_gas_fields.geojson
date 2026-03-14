@@ -1,0 +1,22 @@
+{"type":"FeatureCollection","features":[
+{"type":"Feature","geometry":{"type":"Point","coordinates":[49.40,25.38]},"properties":{"id":"f01","name":"Ghawar","cap_kbpd":3800,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-102.08,31.97]},"properties":{"id":"f02","name":"Permian Basin","cap_kbpd":5600,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[48.05,29.05]},"properties":{"id":"f03","name":"Burgan","cap_kbpd":1100,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[47.30,30.55]},"properties":{"id":"f04","name":"Rumaila","cap_kbpd":1400,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[125.01,46.58]},"properties":{"id":"f05","name":"Daqing","cap_kbpd":800,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[76.70,61.18]},"properties":{"id":"f06","name":"Samotlor","cap_kbpd":900,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-148.33,70.25]},"properties":{"id":"f07","name":"Prudhoe Bay","cap_kbpd":300,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[53.30,46.15]},"properties":{"id":"f08","name":"Tengiz","cap_kbpd":600,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[54.00,22.50]},"properties":{"id":"f09","name":"Shaybah","cap_kbpd":1000,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[48.15,24.15]},"properties":{"id":"f10","name":"Khurais","cap_kbpd":1200,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-98.40,28.70]},"properties":{"id":"f11","name":"Eagle Ford Shale","cap_kbpd":1200,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-103.50,48.10]},"properties":{"id":"f12","name":"Bakken Formation","cap_kbpd":1100,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-69.20,-38.00]},"properties":{"id":"f13","name":"Vaca Muerta","cap_kbpd":350,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[6.05,31.68]},"properties":{"id":"f14","name":"Hassi Messaoud","cap_kbpd":400,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[16.85,8.60]},"properties":{"id":"f15","name":"Doba Basin","cap_kbpd":130,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[51.90,50.10]},"properties":{"id":"f16","name":"Karachaganak","cap_kbpd":300,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-97.40,20.50]},"properties":{"id":"f17","name":"Chicontepec","cap_kbpd":150,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[44.30,32.60]},"properties":{"id":"f18","name":"Kirkuk","cap_kbpd":450,"type":"onshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[52.60,26.20]},"properties":{"id":"f19","name":"South Pars/North Dome","cap_kbpd":800,"type":"offshore"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[57.50,20.50]},"properties":{"id":"f20","name":"PDO Block 6 (Oman)","cap_kbpd":600,"type":"onshore"}}
+]}

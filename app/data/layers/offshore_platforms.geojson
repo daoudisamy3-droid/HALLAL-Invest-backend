@@ -1,0 +1,22 @@
+{"type":"FeatureCollection","features":[
+{"type":"Feature","geometry":{"type":"Point","coordinates":[1.72,61.05]},"properties":{"id":"o01","name":"Brent Field","cap_kbpd":100,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[3.21,56.54]},"properties":{"id":"o02","name":"Ekofisk","cap_kbpd":300,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[2.57,58.97]},"properties":{"id":"o03","name":"Johan Sverdrup","cap_kbpd":755,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-89.00,28.19]},"properties":{"id":"o04","name":"Thunder Horse","cap_kbpd":250,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-90.50,27.80]},"properties":{"id":"o05","name":"Mars-Ursa Hub","cap_kbpd":200,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-92.17,19.85]},"properties":{"id":"o06","name":"Cantarell Complex","cap_kbpd":400,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[51.53,46.24]},"properties":{"id":"o07","name":"Kashagan","cap_kbpd":400,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-42.10,-25.30]},"properties":{"id":"o08","name":"Tupi / Lula","cap_kbpd":1000,"type":"fpso"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-40.00,-22.40]},"properties":{"id":"o09","name":"Marlim","cap_kbpd":200,"type":"fpso"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[49.80,28.10]},"properties":{"id":"o10","name":"Safaniya","cap_kbpd":1200,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[53.60,24.85]},"properties":{"id":"o11","name":"Upper Zakum","cap_kbpd":750,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[4.60,4.20]},"properties":{"id":"o12","name":"Agbami","cap_kbpd":250,"type":"fpso"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[12.00,-7.60]},"properties":{"id":"o13","name":"Girassol","cap_kbpd":250,"type":"fpso"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[123.60,-12.50]},"properties":{"id":"o14","name":"Ichthys FPSO","cap_kbpd":100,"type":"fpso"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[114.10,-21.80]},"properties":{"id":"o15","name":"North West Shelf","cap_kbpd":180,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[18.50,-6.00]},"properties":{"id":"o16","name":"Block 17 (Angola)","cap_kbpd":300,"type":"fpso"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-88.50,28.80]},"properties":{"id":"o17","name":"Appomattox","cap_kbpd":175,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[55.40,25.60]},"properties":{"id":"o18","name":"SARB (Abu Dhabi)","cap_kbpd":420,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[5.10,59.60]},"properties":{"id":"o19","name":"Troll","cap_kbpd":160,"type":"platform"}},
+{"type":"Feature","geometry":{"type":"Point","coordinates":[115.10,4.50]},"properties":{"id":"o20","name":"Gumusut-Kakap","cap_kbpd":135,"type":"fpso"}}
+]}

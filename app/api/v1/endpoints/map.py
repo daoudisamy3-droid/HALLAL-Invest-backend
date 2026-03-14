@@ -9,6 +9,12 @@ from app.services.map_service import (
     get_production_geojson,
     get_massive_production,
 )
+from app.services.geo_etl_service import (
+    get_fields,
+    get_pipelines,
+    get_refineries,
+    get_offshore,
+)
 
 router = APIRouter()
 
@@ -73,3 +79,44 @@ async def production_massive():
         content=data,
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+# ── ETL layers (24h cache, GZip via middleware) ──────────────────
+
+_LAYER_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400"}
+
+
+@router.get(
+    "/map/layers/fields",
+    summary="Oil & gas fields (minified GeoJSON)",
+    description="Minified GeoJSON layer – id, name, cap_kbpd, type only. 24h browser cache.",
+)
+async def layer_fields():
+    return JSONResponse(content=get_fields(), headers=_LAYER_CACHE_HEADERS)
+
+
+@router.get(
+    "/map/layers/pipelines",
+    summary="Pipelines (minified GeoJSON)",
+    description="Minified GeoJSON layer – id, name, cap_kbpd, type only. 24h browser cache.",
+)
+async def layer_pipelines():
+    return JSONResponse(content=get_pipelines(), headers=_LAYER_CACHE_HEADERS)
+
+
+@router.get(
+    "/map/layers/refineries",
+    summary="Refineries & LNG terminals (minified GeoJSON)",
+    description="Minified GeoJSON layer – id, name, cap_kbpd, type only. 24h browser cache.",
+)
+async def layer_refineries():
+    return JSONResponse(content=get_refineries(), headers=_LAYER_CACHE_HEADERS)
+
+
+@router.get(
+    "/map/layers/offshore",
+    summary="Offshore platforms (minified GeoJSON)",
+    description="Minified GeoJSON layer – id, name, cap_kbpd, type only. 24h browser cache.",
+)
+async def layer_offshore():
+    return JSONResponse(content=get_offshore(), headers=_LAYER_CACHE_HEADERS)
