@@ -45,43 +45,43 @@ def get_infrastructure_points() -> list[dict]:
 ENERGY_CHOKEPOINTS: list[dict] = [
     {
         "id": "ck01", "name": "Détroit d'Ormuz", "lat": 26.56, "lng": 56.25,
-        "desc": "20% du pétrole mondial",
+        "desc": "20% du pétrole mondial", "radius_km": 500,
         "volume": "21M barils/j", "impact": "20% conso mondiale",
         "proxy_ticker": "FRO", "proxy_name": "Frontline (Tankers)",
     },
     {
         "id": "ck02", "name": "Détroit de Malacca", "lat": 1.43, "lng": 102.89,
-        "desc": "Hub Asie",
+        "desc": "Hub Asie", "radius_km": 500,
         "volume": "16M barils/j", "impact": "Hub Asie",
         "proxy_ticker": "CEO", "proxy_name": "CNOOC",
     },
     {
         "id": "ck03", "name": "Canal de Suez", "lat": 30.58, "lng": 32.34,
-        "desc": "Route Europe-Asie",
+        "desc": "Route Europe-Asie", "radius_km": 500,
         "volume": "9M barils/j", "impact": "12% commerce mondial",
         "proxy_ticker": "ZIM", "proxy_name": "ZIM Shipping",
     },
     {
         "id": "ck04", "name": "Canal de Panama", "lat": 9.14, "lng": -79.72,
-        "desc": "Route Amériques",
+        "desc": "Route Amériques", "radius_km": 500,
         "volume": "5% commerce global", "impact": "Route GNL (Gaz)",
         "proxy_ticker": "LNG", "proxy_name": "Cheniere Energy",
     },
     {
         "id": "ck05", "name": "Bab el-Mandeb", "lat": 12.58, "lng": 43.33,
-        "desc": "Mer Rouge",
+        "desc": "Mer Rouge", "radius_km": 500,
         "volume": "9M barils/j", "impact": "12% commerce mondial",
         "proxy_ticker": "ZIM", "proxy_name": "ZIM Shipping",
     },
     {
         "id": "ck06", "name": "Détroit du Bosphore", "lat": 41.22, "lng": 29.11,
-        "desc": "Exportations Mer Noire/Caspienne",
+        "desc": "Exportations Mer Noire/Caspienne", "radius_km": 500,
         "volume": "3M barils/j", "impact": "Exportations Mer Noire/Caspienne",
         "proxy_ticker": "TNK", "proxy_name": "Teekay Tankers",
     },
     {
         "id": "ck07", "name": "Détroits Danois", "lat": 55.30, "lng": 11.00,
-        "desc": "Exportations Baltique/Russie",
+        "desc": "Exportations Baltique/Russie", "radius_km": 500,
         "volume": "3.2M barils/j", "impact": "Exportations Baltique/Russie",
         "proxy_ticker": "TNK", "proxy_name": "Teekay Tankers",
     },
@@ -155,6 +155,56 @@ def get_piracy_risk() -> dict:
     return PIRACY_RISK_GEOJSON
 
 
+# ── Piracy zones (native GeoJSON, 4 exact polygons) ─────────────
+
+PIRACY_ZONES_GEOJSON: dict = {
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "properties": {"id": "pz01", "name": "Golfe d'Aden", "risk_level": "High",
+                           "desc": "Corridor Somalie – Yémen, piraterie historique"},
+            "geometry": {"type": "Polygon", "coordinates": [[
+                [43.0, 11.0], [51.3, 11.0], [51.3, 15.5],
+                [48.0, 15.5], [43.0, 13.0], [43.0, 11.0],
+            ]]},
+        },
+        {
+            "type": "Feature",
+            "properties": {"id": "pz02", "name": "Golfe de Guinée", "risk_level": "High",
+                           "desc": "Côtes Nigeria – Cameroun – Ghana, enlèvements et vols"},
+            "geometry": {"type": "Polygon", "coordinates": [[
+                [-5.0, 0.0], [10.0, 0.0], [10.0, 7.0],
+                [-5.0, 7.0], [-5.0, 0.0],
+            ]]},
+        },
+        {
+            "type": "Feature",
+            "properties": {"id": "pz03", "name": "Détroit de Malacca", "risk_level": "High",
+                           "desc": "Zone de piraterie active, trafic maritime dense"},
+            "geometry": {"type": "Polygon", "coordinates": [[
+                [99.0, -1.5], [105.5, -1.5], [105.5, 4.5],
+                [99.0, 4.5], [99.0, -1.5],
+            ]]},
+        },
+        {
+            "type": "Feature",
+            "properties": {"id": "pz04", "name": "Mer Rouge", "risk_level": "High",
+                           "desc": "Zone Houthis, attaques sur navires commerciaux"},
+            "geometry": {"type": "Polygon", "coordinates": [[
+                [36.0, 12.5], [43.5, 12.5], [43.5, 20.0],
+                [38.5, 28.0], [36.0, 28.0], [36.0, 12.5],
+            ]]},
+        },
+    ],
+}
+
+
+def get_piracy_zones() -> dict:
+    """Return the 4-zone piracy GeoJSON FeatureCollection."""
+    return PIRACY_ZONES_GEOJSON
+
+
 # ── Oil production sites (GeoJSON from local file) ───────────────
 
 _EMPTY_FEATURE_COLLECTION: dict[str, Any] = {"type": "FeatureCollection", "features": []}
@@ -199,3 +249,64 @@ def get_production_geojson() -> dict[str, Any]:
         logger.error("production geojson unexpected error: %s", exc)
         _production_cache = _EMPTY_FEATURE_COLLECTION
         return _production_cache
+
+
+# ── Massive production dataset (EIA/GEM/OSM fusion mock) ────────
+# Generates ~20 000+ points with capacity_kbpd fallback rules:
+#   - offshore: default 50 kbpd
+#   - onshore:  default 10 kbpd
+
+_MASSIVE_GEOJSON_PATH = Path(__file__).resolve().parent.parent / "data" / "massive_oil_production.geojson"
+
+_DEFAULT_CAPACITY_KBPD = {"offshore": 50, "onshore": 10}
+
+_massive_cache: dict[str, Any] | None = None
+
+
+def _normalise_feature(feat: dict) -> dict:
+    """Ensure every feature has properties.capacity_kbpd."""
+    props = feat.get("properties") or {}
+    if "capacity_kbpd" not in props or props["capacity_kbpd"] is None:
+        site_type = props.get("type", "onshore")
+        props["capacity_kbpd"] = _DEFAULT_CAPACITY_KBPD.get(site_type, 10)
+        feat["properties"] = props
+    return feat
+
+
+def get_massive_production() -> dict[str, Any]:
+    """
+    Load the massive production GeoJSON (20 000+ points).
+
+    Tries external file first; falls back to the smaller 30-point
+    dataset with normalised capacity_kbpd.  Never raises.
+    """
+    global _massive_cache
+    if _massive_cache is not None:
+        return _massive_cache
+
+    # Try large file first
+    try:
+        raw = _MASSIVE_GEOJSON_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict) and data.get("type") == "FeatureCollection":
+            data["features"] = [_normalise_feature(f) for f in data.get("features", [])]
+            _massive_cache = data
+            logger.info("massive production: loaded %d features", len(data["features"]))
+            return _massive_cache
+    except FileNotFoundError:
+        logger.info("massive geojson not found, falling back to base dataset")
+    except json.JSONDecodeError as exc:
+        logger.error("massive geojson corrupt: %s, falling back", exc)
+    except Exception as exc:
+        logger.error("massive geojson error: %s, falling back", exc)
+
+    # Fallback: use the 30-point base dataset, normalised
+    try:
+        base = get_production_geojson()
+        features = [_normalise_feature(dict(f)) for f in base.get("features", [])]
+        _massive_cache = {"type": "FeatureCollection", "features": features}
+        return _massive_cache
+    except Exception as exc:
+        logger.error("massive fallback failed: %s", exc)
+        _massive_cache = _EMPTY_FEATURE_COLLECTION
+        return _massive_cache

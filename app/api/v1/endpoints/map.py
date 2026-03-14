@@ -5,7 +5,9 @@ from app.services.map_service import (
     get_infrastructure_points,
     get_energy_chokepoints,
     get_piracy_risk,
+    get_piracy_zones,
     get_production_geojson,
+    get_massive_production,
 )
 
 router = APIRouter()
@@ -45,6 +47,28 @@ async def piracy_risk():
 )
 async def production():
     data = get_production_geojson()
+    return JSONResponse(
+        content=data,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@router.get(
+    "/map/piracy-zones",
+    summary="Piracy zones (native GeoJSON, 4 polygons)",
+    description="GeoJSON FeatureCollection: Gulf of Aden, Gulf of Guinea, Strait of Malacca, Red Sea. Each with risk_level: High.",
+)
+async def piracy_zones():
+    return get_piracy_zones()
+
+
+@router.get(
+    "/map/production/massive",
+    summary="Massive oil production dataset (GeoJSON, 20k+ points)",
+    description="GeoJSON FeatureCollection of global oil production sites with capacity_kbpd. GZip-compressed, 1h browser cache.",
+)
+async def production_massive():
+    data = get_massive_production()
     return JSONResponse(
         content=data,
         headers={"Cache-Control": "public, max-age=3600"},
