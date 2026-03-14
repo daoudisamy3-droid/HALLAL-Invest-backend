@@ -10,6 +10,8 @@ from app.services.macro_service import (
     get_risk_comparison,
     get_energy_data,
     get_energy_comparison,
+    get_energy_chart,
+    get_energy_table,
     get_logistics_data,
     get_logistics_comparison,
 )
@@ -95,6 +97,26 @@ async def energy():
 )
 async def energy_comparison():
     return await get_energy_comparison()
+
+
+@router.get(
+    "/macro/energy/chart",
+    summary="Energy correlation chart (WTI vs XLE)",
+    description="24h base-0% normalised series for WTI Crude and Energy Select ETF (XLE). Format: [{time, WTI, XLE}].",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def energy_chart():
+    return await get_energy_chart()
+
+
+@router.get(
+    "/macro/energy/table",
+    summary="Energy live table",
+    description="WTI, Brent, Natural Gas, Heating Oil — price, change %, day high/low, and market status.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def energy_table():
+    return await get_energy_table()
 
 
 @router.get(

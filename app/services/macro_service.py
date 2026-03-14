@@ -676,6 +676,111 @@ async def get_energy_comparison() -> list[dict[str, Any]]:
     return result
 
 
+# ── Energy Center: correlation chart (WTI + XLE) ────────────────
+
+_ENERGY_CHART_TICKERS = {"CL=F": "WTI", "XLE": "XLE"}
+
+
+async def get_energy_chart() -> list[dict[str, Any]]:
+    """
+    24h WTI vs XLE correlation chart, base 0% (60s TTL cache).
+
+    [{time: "09:30", WTI: 0.3, XLE: 0.1}, ...]
+    """
+    cached = _cache_get("energy_chart")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    tasks = {
+        sym: loop.run_in_executor(_executor, _fetch_commodity_intraday, sym)
+        for sym in _ENERGY_CHART_TICKERS
+    }
+    raw: dict[str, Optional[list[tuple[str, float]]]] = {}
+    for sym, task in tasks.items():
+        raw[sym] = await task
+
+    result = _merge_to_flat_rows(raw, _ENERGY_CHART_TICKERS)
+    _cache_set("energy_chart", result)
+    return result
+
+
+# ── Energy Center: live table (WTI, Brent, NatGas, Heating Oil) ─
+
+_ENERGY_TABLE_TICKERS = {
+    "CL=F": {"name": "WTI Crude Oil",  "unit": "USD/bbl"},
+    "BZ=F": {"name": "Brent Oil",      "unit": "USD/bbl"},
+    "NG=F": {"name": "Natural Gas",    "unit": "USD/MMBtu"},
+    "HO=F": {"name": "Heating Oil",    "unit": "USD/gal"},
+}
+
+_last_known_energy_table: dict[str, dict[str, Any]] = {}
+
+
+def _fetch_energy_table_row(symbol: str) -> dict[str, Any]:
+    """Blocking: fetch one energy ticker with high/low for the table view."""
+    meta = _ENERGY_TABLE_TICKERS[symbol]
+    is_open = _is_cme_open()
+    try:
+        ticker = yf.Ticker(symbol)
+        fi = ticker.fast_info
+        price = float(fi["lastPrice"])
+        prev_close = float(fi["previousClose"])
+        change = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        day_high = round(float(fi["dayHigh"]), 2) if fi.get("dayHigh") else None
+        day_low = round(float(fi["dayLow"]), 2) if fi.get("dayLow") else None
+
+        result = {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "price": round(price, 2),
+            "previous_close": round(prev_close, 2),
+            "change": change,
+            "change_pct": change_pct,
+            "day_high": day_high,
+            "day_low": day_low,
+            "is_open": is_open,
+        }
+        _last_known_energy_table[symbol] = result
+        return result
+    except Exception as exc:
+        logger.warning("Failed to fetch energy table ticker %s: %s", symbol, exc)
+        cached = _last_known_energy_table.get(symbol)
+        if cached:
+            return {**cached, "is_open": is_open}
+        return {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "price": None,
+            "previous_close": None,
+            "change": None,
+            "change_pct": None,
+            "day_high": None,
+            "day_low": None,
+            "is_open": is_open,
+            "error": str(exc),
+        }
+
+
+async def get_energy_table() -> list[dict[str, Any]]:
+    """Fetch energy table snapshots with high/low (60s TTL cache)."""
+    cached = _cache_get("energy_table")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(_executor, _fetch_energy_table_row, sym)
+        for sym in _ENERGY_TABLE_TICKERS
+    ]
+    results = list(await asyncio.gather(*tasks))
+    _cache_set("energy_table", results)
+    return results
+
+
 # ── Logistics sector (Transport ETF, FedEx, Maersk, ZIM) ────────
 
 LOGISTICS_TICKERS = {

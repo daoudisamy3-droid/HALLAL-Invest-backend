@@ -31,3 +31,19 @@ INFRASTRUCTURE_POINTS: list[dict] = [
 def get_infrastructure_points() -> list[dict]:
     """Return the full static list of infrastructure points."""
     return INFRASTRUCTURE_POINTS
+
+
+# ── Energy chokepoints (geopolitical) ────────────────────────────
+
+ENERGY_CHOKEPOINTS: list[dict] = [
+    {"id": "ck01", "name": "Détroit d'Ormuz",   "lat": 26.56, "lng": 56.25, "desc": "20% du pétrole mondial"},
+    {"id": "ck02", "name": "Détroit de Malacca", "lat": 1.43,  "lng": 102.89, "desc": "Hub Asie"},
+    {"id": "ck03", "name": "Canal de Suez",      "lat": 30.58, "lng": 32.34, "desc": "Route Europe-Asie"},
+    {"id": "ck04", "name": "Canal de Panama",    "lat": 9.14,  "lng": -79.72, "desc": "Route Amériques"},
+    {"id": "ck05", "name": "Bab el-Mandeb",      "lat": 12.58, "lng": 43.33, "desc": "Mer Rouge"},
+]
+
+
+def get_energy_chokepoints() -> list[dict]:
+    """Return the 5 major energy chokepoints."""
+    return ENERGY_CHOKEPOINTS
