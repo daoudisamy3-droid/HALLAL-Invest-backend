@@ -1,6 +1,13 @@
-"""Static infrastructure points for the global map overlay."""
+"""Static infrastructure points and geo data for the global map overlay."""
 
 from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 INFRASTRUCTURE_POINTS: list[dict] = [
     # ── Energy (10): platforms, hubs, LNG terminals ──────────────────
@@ -66,11 +73,23 @@ ENERGY_CHOKEPOINTS: list[dict] = [
         "volume": "9M barils/j", "impact": "12% commerce mondial",
         "proxy_ticker": "ZIM", "proxy_name": "ZIM Shipping",
     },
+    {
+        "id": "ck06", "name": "Détroit du Bosphore", "lat": 41.22, "lng": 29.11,
+        "desc": "Exportations Mer Noire/Caspienne",
+        "volume": "3M barils/j", "impact": "Exportations Mer Noire/Caspienne",
+        "proxy_ticker": "TNK", "proxy_name": "Teekay Tankers",
+    },
+    {
+        "id": "ck07", "name": "Détroits Danois", "lat": 55.30, "lng": 11.00,
+        "desc": "Exportations Baltique/Russie",
+        "volume": "3.2M barils/j", "impact": "Exportations Baltique/Russie",
+        "proxy_ticker": "TNK", "proxy_name": "Teekay Tankers",
+    },
 ]
 
 
 def get_energy_chokepoints() -> list[dict]:
-    """Return the 5 major energy chokepoints."""
+    """Return the 7 major energy chokepoints."""
     return ENERGY_CHOKEPOINTS
 
 
@@ -134,3 +153,49 @@ PIRACY_RISK_GEOJSON: dict = {
 def get_piracy_risk() -> dict:
     """Return a lightweight GeoJSON FeatureCollection of piracy risk zones."""
     return PIRACY_RISK_GEOJSON
+
+
+# ── Oil production sites (GeoJSON from local file) ───────────────
+
+_EMPTY_FEATURE_COLLECTION: dict[str, Any] = {"type": "FeatureCollection", "features": []}
+
+_PRODUCTION_GEOJSON_PATH = Path(__file__).resolve().parent.parent / "data" / "global_oil_production.geojson"
+
+# In-memory cache – loaded once, never expires (static file).
+_production_cache: dict[str, Any] | None = None
+
+
+def get_production_geojson() -> dict[str, Any]:
+    """
+    Load and cache the global oil production GeoJSON.
+
+    Resilience rules:
+    - File missing / unreadable → empty FeatureCollection + log warning
+    - Corrupt JSON → empty FeatureCollection + log error
+    - Never raises, never returns 500.
+    """
+    global _production_cache
+    if _production_cache is not None:
+        return _production_cache
+
+    try:
+        raw = _PRODUCTION_GEOJSON_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if not isinstance(data, dict) or data.get("type") != "FeatureCollection":
+            logger.error("production geojson: invalid structure, returning empty")
+            _production_cache = _EMPTY_FEATURE_COLLECTION
+            return _production_cache
+        _production_cache = data
+        return _production_cache
+    except FileNotFoundError:
+        logger.warning("production geojson not found at %s", _PRODUCTION_GEOJSON_PATH)
+        _production_cache = _EMPTY_FEATURE_COLLECTION
+        return _production_cache
+    except json.JSONDecodeError as exc:
+        logger.error("production geojson corrupt: %s", exc)
+        _production_cache = _EMPTY_FEATURE_COLLECTION
+        return _production_cache
+    except Exception as exc:
+        logger.error("production geojson unexpected error: %s", exc)
+        _production_cache = _EMPTY_FEATURE_COLLECTION
+        return _production_cache

@@ -914,13 +914,14 @@ async def get_logistics_comparison() -> list[dict[str, Any]]:
     return result
 
 
-# ── Chokepoints proxy tickers (FRO, CEO, ZIM, LNG) ──────────────
+# ── Chokepoints proxy tickers (FRO, CEO, ZIM, LNG, TNK) ─────────
 
 _CHOKEPOINT_PROXYS = {
     "FRO": {"name": "Frontline (Tankers)", "chokepoint": "Ormuz"},
     "CEO": {"name": "CNOOC",              "chokepoint": "Malacca"},
     "ZIM": {"name": "ZIM Shipping",       "chokepoint": "Suez / Bab el-Mandeb"},
     "LNG": {"name": "Cheniere Energy",    "chokepoint": "Panama"},
+    "TNK": {"name": "Teekay Tankers",     "chokepoint": "Bosphore / Danemark"},
 }
 
 _last_known_proxy: dict[str, dict[str, Any]] = {}

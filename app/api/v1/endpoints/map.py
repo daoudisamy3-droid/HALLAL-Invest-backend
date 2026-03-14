@@ -1,6 +1,12 @@
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
-from app.services.map_service import get_infrastructure_points, get_energy_chokepoints, get_piracy_risk
+from app.services.map_service import (
+    get_infrastructure_points,
+    get_energy_chokepoints,
+    get_piracy_risk,
+    get_production_geojson,
+)
 
 router = APIRouter()
 
@@ -30,3 +36,16 @@ async def chokepoints():
 )
 async def piracy_risk():
     return get_piracy_risk()
+
+
+@router.get(
+    "/map/production",
+    summary="Global oil production sites (GeoJSON)",
+    description="GeoJSON FeatureCollection of ~30 major oil production sites with name, type (offshore/onshore), and volume_bpd.",
+)
+async def production():
+    data = get_production_geojson()
+    return JSONResponse(
+        content=data,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
