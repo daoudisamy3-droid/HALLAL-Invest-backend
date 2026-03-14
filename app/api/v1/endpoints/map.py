@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.services.map_service import get_infrastructure_points, get_energy_chokepoints
+from app.services.map_service import get_infrastructure_points, get_energy_chokepoints, get_piracy_risk
 
 router = APIRouter()
 
@@ -21,3 +21,12 @@ async def infrastructure():
 )
 async def chokepoints():
     return get_energy_chokepoints()
+
+
+@router.get(
+    "/map/piracy-risk",
+    summary="Piracy risk zones (GeoJSON)",
+    description="Lightweight GeoJSON FeatureCollection with high-risk piracy polygons: Gulf of Aden, Strait of Malacca, Gulf of Guinea.",
+)
+async def piracy_risk():
+    return get_piracy_risk()

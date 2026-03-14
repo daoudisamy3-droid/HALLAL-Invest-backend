@@ -946,6 +946,7 @@ def _fetch_single_proxy(symbol: str) -> dict[str, Any]:
             "previous_close": round(prev_close, 2),
             "change": change,
             "change_pct": change_pct,
+            "status": "success",
             "is_open": is_open,
         }
         _last_known_proxy[symbol] = result
@@ -954,7 +955,7 @@ def _fetch_single_proxy(symbol: str) -> dict[str, Any]:
         logger.warning("Failed to fetch proxy ticker %s: %s", symbol, exc)
         cached = _last_known_proxy.get(symbol)
         if cached:
-            return {**cached, "is_open": is_open}
+            return {**cached, "status": "success", "is_open": is_open}
         return {
             "symbol": symbol,
             "name": meta["name"],
@@ -963,8 +964,9 @@ def _fetch_single_proxy(symbol: str) -> dict[str, Any]:
             "previous_close": None,
             "change": None,
             "change_pct": None,
+            "status": "error",
+            "message": "Donnée indisponible",
             "is_open": is_open,
-            "error": str(exc),
         }
 
 
@@ -982,3 +984,113 @@ async def get_chokepoints_proxys() -> list[dict[str, Any]]:
     results = list(await asyncio.gather(*tasks))
     _cache_set("chokepoints_proxys", results)
     return results
+
+
+# ── Macro status (Baltic Dry Index + US Crude Stocks) ────────────
+
+_MACRO_STATUS_TICKERS = {
+    "BDRY": {"name": "Baltic Dry Index (ETF)", "unit": "USD"},
+}
+
+_last_known_status: dict[str, dict[str, Any]] = {}
+
+
+def _fetch_macro_status_ticker(symbol: str) -> dict[str, Any]:
+    """Blocking: fetch one macro-status ticker."""
+    meta = _MACRO_STATUS_TICKERS[symbol]
+    is_open = _is_market_open("America/New_York", time(9, 30), time(16, 0))
+    try:
+        ticker = yf.Ticker(symbol)
+        fi = ticker.fast_info
+        price = float(fi["lastPrice"])
+        prev_close = float(fi["previousClose"])
+        change = round(price - prev_close, 2)
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+
+        result = {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "value": round(price, 2),
+            "previous_close": round(prev_close, 2),
+            "change": change,
+            "change_pct": change_pct,
+            "status": "success",
+            "is_open": is_open,
+        }
+        _last_known_status[symbol] = result
+        return result
+    except Exception as exc:
+        logger.warning("Failed to fetch macro status ticker %s: %s", symbol, exc)
+        cached = _last_known_status.get(symbol)
+        if cached:
+            return {**cached, "status": "success", "is_open": is_open}
+        return {
+            "symbol": symbol,
+            "name": meta["name"],
+            "unit": meta["unit"],
+            "value": None,
+            "previous_close": None,
+            "change": None,
+            "change_pct": None,
+            "status": "error",
+            "message": "Donnée indisponible",
+            "is_open": is_open,
+        }
+
+
+def _fetch_crude_stocks() -> dict[str, Any]:
+    """
+    Fetch US crude oil inventory proxy via COEPRUSQ ticker (yfinance).
+    Falls back gracefully if unavailable.
+    """
+    symbol = "CL=F"
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="5d")
+        if hist is None or hist.empty:
+            raise ValueError("No data")
+
+        latest_vol = float(hist["Volume"].iloc[-1])
+        prev_vol = float(hist["Volume"].iloc[-2]) if len(hist) >= 2 else latest_vol
+        vol_change_pct = round(((latest_vol / prev_vol) - 1) * 100, 2) if prev_vol else 0.0
+
+        return {
+            "symbol": "US_CRUDE_STOCKS",
+            "name": "US Crude Stocks (proxy: WTI volume)",
+            "unit": "contracts",
+            "value": int(latest_vol),
+            "change_pct": vol_change_pct,
+            "status": "success",
+        }
+    except Exception as exc:
+        logger.warning("Failed to fetch crude stocks proxy: %s", exc)
+        return {
+            "symbol": "US_CRUDE_STOCKS",
+            "name": "US Crude Stocks (proxy: WTI volume)",
+            "unit": "contracts",
+            "value": None,
+            "change_pct": None,
+            "status": "error",
+            "message": "Donnée indisponible",
+        }
+
+
+async def get_macro_status() -> dict[str, Any]:
+    """Fetch Baltic Dry Index + US crude stocks (60s TTL cache)."""
+    cached = _cache_get("macro_status")
+    if cached is not None:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    bdry_task = loop.run_in_executor(_executor, _fetch_macro_status_ticker, "BDRY")
+    crude_task = loop.run_in_executor(_executor, _fetch_crude_stocks)
+
+    bdry, crude = await asyncio.gather(bdry_task, crude_task)
+
+    result = {
+        "baltic_dry_index": bdry,
+        "us_crude_stocks": crude,
+    }
+    _cache_set("macro_status", result)
+    return result

@@ -15,6 +15,7 @@ from app.services.macro_service import (
     get_logistics_data,
     get_logistics_comparison,
     get_chokepoints_proxys,
+    get_macro_status,
 )
 
 router = APIRouter()
@@ -148,3 +149,13 @@ async def logistics_comparison():
 )
 async def chokepoints_proxys():
     return await get_chokepoints_proxys()
+
+
+@router.get(
+    "/macro/status",
+    summary="Macro status (Baltic Dry Index + US Crude Stocks)",
+    description="Baltic Dry Index (BDRY) and US crude stocks proxy for the Energy Center accordion.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def macro_status():
+    return await get_macro_status()

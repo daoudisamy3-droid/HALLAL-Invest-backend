@@ -72,3 +72,65 @@ ENERGY_CHOKEPOINTS: list[dict] = [
 def get_energy_chokepoints() -> list[dict]:
     """Return the 5 major energy chokepoints."""
     return ENERGY_CHOKEPOINTS
+
+
+# ── Piracy risk zones (static GeoJSON) ───────────────────────────
+
+PIRACY_RISK_GEOJSON: dict = {
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "properties": {
+                "id": "pz01",
+                "name": "Golfe d'Aden",
+                "risk_level": "High",
+                "desc": "Corridor Somalie – Yémen, piraterie historique",
+            },
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [43.0, 11.0], [51.0, 11.0], [51.0, 15.0],
+                    [43.0, 15.0], [43.0, 11.0],
+                ]],
+            },
+        },
+        {
+            "type": "Feature",
+            "properties": {
+                "id": "pz02",
+                "name": "Détroit de Malacca",
+                "risk_level": "High",
+                "desc": "Zone de piraterie active, trafic maritime dense",
+            },
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [99.0, -1.0], [105.0, -1.0], [105.0, 4.0],
+                    [99.0, 4.0], [99.0, -1.0],
+                ]],
+            },
+        },
+        {
+            "type": "Feature",
+            "properties": {
+                "id": "pz03",
+                "name": "Golfe de Guinée",
+                "risk_level": "High",
+                "desc": "Côtes Nigeria – Cameroun – Ghana, enlèvements et vols",
+            },
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [-5.0, 0.0], [10.0, 0.0], [10.0, 7.0],
+                    [-5.0, 7.0], [-5.0, 0.0],
+                ]],
+            },
+        },
+    ],
+}
+
+
+def get_piracy_risk() -> dict:
+    """Return a lightweight GeoJSON FeatureCollection of piracy risk zones."""
+    return PIRACY_RISK_GEOJSON
