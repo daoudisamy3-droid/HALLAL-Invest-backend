@@ -181,3 +181,39 @@ def get_refineries() -> dict[str, Any]:
 def get_offshore() -> dict[str, Any]:
     """Offshore platforms layer."""
     return _load_layer("offshore_platforms")
+
+
+# ── Facilities (massive unified layer, 15k+ points) ─────────────
+
+_facilities_cache: dict[str, Any] | None = None
+
+
+def get_facilities() -> dict[str, Any]:
+    """
+    Load the massive facilities GeoJSON (15 000+ wells & platforms).
+
+    Uses permanent in-memory cache (static data). Never raises.
+    """
+    global _facilities_cache
+    if _facilities_cache is not None:
+        return _facilities_cache
+
+    path = _DATA_DIR / "facilities.geojson"
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict) and data.get("type") == "FeatureCollection":
+            _facilities_cache = data
+            logger.info("facilities: loaded %d features (%.1f MB)",
+                        len(data["features"]), len(raw) / 1_048_576)
+            return _facilities_cache
+        logger.error("facilities: invalid GeoJSON structure")
+    except FileNotFoundError:
+        logger.warning("facilities: file not found at %s – run scripts/fetch_wells_data.py", path)
+    except json.JSONDecodeError as exc:
+        logger.error("facilities: corrupt JSON – %s", exc)
+    except Exception as exc:
+        logger.error("facilities: unexpected error – %s", exc)
+
+    _facilities_cache = _EMPTY_FC
+    return _facilities_cache

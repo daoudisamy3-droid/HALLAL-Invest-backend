@@ -14,6 +14,7 @@ from app.services.geo_etl_service import (
     get_pipelines,
     get_refineries,
     get_offshore,
+    get_facilities,
 )
 
 router = APIRouter()
@@ -120,3 +121,13 @@ async def layer_refineries():
 )
 async def layer_offshore():
     return JSONResponse(content=get_offshore(), headers=_LAYER_CACHE_HEADERS)
+
+
+@router.get(
+    "/map/layers/facilities",
+    summary="All facilities – wells & platforms (15k+ points, GZip)",
+    description="Massive unified GeoJSON layer of global oil & gas facilities. "
+                "Each point: {lat, lng, type, name}. GZip-compressed, 24h browser cache.",
+)
+async def layer_facilities():
+    return JSONResponse(content=get_facilities(), headers=_LAYER_CACHE_HEADERS)
