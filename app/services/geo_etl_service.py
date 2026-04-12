@@ -197,6 +197,38 @@ _GENERATED_PATH = _DATA_DIR / "facilities.geojson"
 _facilities_cache: dict[str, Any] | None = None
 _fetch_triggered = False
 
+# Fallback de survie – toujours renvoyé quand aucune source n'est disponible.
+# 4 sites majeurs connus, coordonnées exactes.
+_HARDCODED_FALLBACK_FC: dict[str, Any] = {
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [49.0, 26.0]},
+            "properties": {"id": "hc_01", "name": "Ghawar", "type": "onshore",
+                           "cap_kbpd": 5000, "lat": 26.0, "lng": 49.0},
+        },
+        {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [-102.0, 31.0]},
+            "properties": {"id": "hc_02", "name": "Permian", "type": "onshore",
+                           "cap_kbpd": 4000, "lat": 31.0, "lng": -102.0},
+        },
+        {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [3.0, 56.0]},
+            "properties": {"id": "hc_03", "name": "North Sea Alpha", "type": "offshore",
+                           "cap_kbpd": 1500, "lat": 56.0, "lng": 3.0},
+        },
+        {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [-90.0, 28.0]},
+            "properties": {"id": "hc_04", "name": "GOM Deepwater", "type": "offshore",
+                           "cap_kbpd": 2000, "lat": 28.0, "lng": -90.0},
+        },
+    ],
+}
+
 
 def _osm_to_geojson(data: dict) -> dict[str, Any]:
     """Convert our OSM JSON format to standard GeoJSON FeatureCollection."""
@@ -297,11 +329,14 @@ def get_facilities() -> dict[str, Any]:
     if result is None:
         result = _try_load_generated()
 
-    # 3. Nothing available: trigger background fetch, return empty
+    # 3. Nothing available: trigger background fetch, return hardcoded survival fallback
     if result is None:
-        logger.warning("no facilities data available – run: python scripts/fetch_osm_energy.py")
+        logger.warning(
+            "no facilities data available – serving hardcoded fallback (4 sites). "
+            "Run: python scripts/fetch_osm_energy.py"
+        )
         _trigger_background_fetch()
-        result = _EMPTY_FC
+        result = _HARDCODED_FALLBACK_FC
 
     _facilities_cache = result
     return _facilities_cache
