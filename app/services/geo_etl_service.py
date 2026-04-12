@@ -197,6 +197,43 @@ _GENERATED_PATH = _DATA_DIR / "facilities.geojson"
 _facilities_cache: dict[str, Any] | None = None
 _fetch_triggered = False
 
+# ── Indestructible hardcoded fallback ────────────────────────────
+# Survival data: if OSM is empty/missing AND the generated dataset
+# is missing, we MUST still return real points so the frontend map
+# can render. These 4 points represent the world's most iconic
+# oil & gas sites and are guaranteed to always be available.
+_HARDCODED_FACILITIES: list[dict[str, Any]] = [
+    {"lat": 26.0, "lon": 49.0, "cap_kbpd": 5000, "type": "onshore", "name": "Ghawar"},
+    {"lat": 31.0, "lon": -102.0, "cap_kbpd": 4000, "type": "onshore", "name": "Permian"},
+    {"lat": 56.0, "lon": 3.0, "cap_kbpd": 1500, "type": "offshore", "name": "North Sea Alpha"},
+    {"lat": 28.0, "lon": -90.0, "cap_kbpd": 2000, "type": "offshore", "name": "GOM Deepwater"},
+]
+
+
+def _hardcoded_fallback_fc() -> dict[str, Any]:
+    """
+    Build a GeoJSON FeatureCollection from the hardcoded 4-point survival
+    dataset. Schema matches the existing facilities endpoint contract:
+    properties: {id, name, type, cap_kbpd, lat, lng}.
+    """
+    features = []
+    for i, site in enumerate(_HARDCODED_FACILITIES):
+        lat = site["lat"]
+        lon = site["lon"]
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": {
+                "id": f"hc_{i + 1}",
+                "name": site["name"],
+                "type": site["type"],
+                "cap_kbpd": site["cap_kbpd"],
+                "lat": lat,
+                "lng": lon,
+            },
+        })
+    return {"type": "FeatureCollection", "features": features}
+
 
 def _osm_to_geojson(data: dict) -> dict[str, Any]:
     """Convert our OSM JSON format to standard GeoJSON FeatureCollection."""
@@ -221,15 +258,27 @@ def _osm_to_geojson(data: dict) -> dict[str, Any]:
 
 
 def _try_load_osm() -> dict[str, Any] | None:
-    """Try loading real OSM data. Returns GeoJSON or None."""
+    """Try loading real OSM data. Returns GeoJSON or None if empty/missing."""
     try:
+        if not _OSM_PATH.exists():
+            return None
         raw = _OSM_PATH.read_text(encoding="utf-8")
+        if not raw.strip():
+            logger.info("osm data file empty, skipping")
+            return None
         data = json.loads(raw)
-        total = data.get("total", 0)
+        features_raw = data.get("features") or []
+        total = data.get("total", len(features_raw))
+        if total <= 0 or not features_raw:
+            logger.info("osm data has 0 features, skipping")
+            return None
         if total < 100:
             logger.info("osm data too small (%d features), skipping", total)
             return None
         geojson = _osm_to_geojson(data)
+        if not geojson.get("features"):
+            logger.info("osm data produced 0 valid features, skipping")
+            return None
         logger.info("facilities: loaded %d real OSM features", len(geojson["features"]))
         return geojson
     except FileNotFoundError:
@@ -240,11 +289,19 @@ def _try_load_osm() -> dict[str, Any] | None:
 
 
 def _try_load_generated() -> dict[str, Any] | None:
-    """Try loading generated fallback data."""
+    """Try loading generated fallback data. Returns None if empty/missing."""
     try:
+        if not _GENERATED_PATH.exists():
+            return None
         raw = _GENERATED_PATH.read_text(encoding="utf-8")
+        if not raw.strip():
+            return None
         data = json.loads(raw)
-        if isinstance(data, dict) and data.get("type") == "FeatureCollection":
+        if (
+            isinstance(data, dict)
+            and data.get("type") == "FeatureCollection"
+            and data.get("features")
+        ):
             logger.info("facilities: loaded %d generated features (%.1f MB)",
                         len(data["features"]), len(raw) / 1_048_576)
             return data
@@ -281,10 +338,14 @@ def _trigger_background_fetch() -> None:
 
 def get_facilities() -> dict[str, Any]:
     """
-    Load facilities data – OSM real data first, generated fallback second.
+    Load facilities data with an indestructible fallback chain:
+      1. OSM real data     (app/data/osm_energy_facilities.json)
+      2. Generated dataset (app/data/layers/facilities.geojson)
+      3. Hardcoded 4-point survival fallback (always works)
 
-    If neither file exists, triggers background OSM fetch and returns
-    empty FeatureCollection. Permanent in-memory cache. Never raises.
+    The hardcoded fallback is NEVER cached so a later successful load
+    (e.g. after background OSM fetch completes) can take over. Never
+    returns an empty FeatureCollection and never raises.
     """
     global _facilities_cache
     if _facilities_cache is not None:
@@ -297,11 +358,17 @@ def get_facilities() -> dict[str, Any]:
     if result is None:
         result = _try_load_generated()
 
-    # 3. Nothing available: trigger background fetch, return empty
-    if result is None:
-        logger.warning("no facilities data available – run: python scripts/fetch_osm_energy.py")
+    # 3. Both missing/empty: return indestructible hardcoded fallback.
+    #    Trigger a background OSM fetch so the next call can upgrade,
+    #    but do NOT cache the hardcoded result.
+    if result is None or not result.get("features"):
+        logger.warning(
+            "facilities: no real data available, returning hardcoded "
+            "survival fallback (%d points) – run: python scripts/fetch_osm_energy.py",
+            len(_HARDCODED_FACILITIES),
+        )
         _trigger_background_fetch()
-        result = _EMPTY_FC
+        return _hardcoded_fallback_fc()
 
     _facilities_cache = result
     return _facilities_cache
