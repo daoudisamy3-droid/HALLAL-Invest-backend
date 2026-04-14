@@ -88,13 +88,17 @@ def _round(val: Optional[float], decimals: int = 2) -> Optional[float]:
 
 
 def _empty_payload() -> dict[str, Any]:
-    """All-null contract shell."""
+    """
+    Graceful-degradation fallback returned whenever data fetch fails.
+    All metrics are None EXCEPT industryAvgPe which defaults to 15.0
+    so the frontend gauges can still render a neutral baseline.
+    """
     return {
         "valuation": {
             "pe": None,
             "ps": None,
             "forwardPe": None,
-            "industryAvgPe": None,
+            "industryAvgPe": 15.0,
         },
         "health": {
             "debtToEquity": None,
@@ -185,63 +189,78 @@ def _normalise_debt_to_equity(raw: Optional[float]) -> Optional[float]:
 
 
 def _fetch_risk_blocking(symbol: str) -> dict[str, Any]:
-    """Blocking yfinance fetch. Returns the strict 3-block contract."""
+    """
+    Blocking yfinance fetch. Returns the strict 3-block contract.
+
+    Graceful degradation: ANY exception anywhere in this function is
+    caught at the top level and collapses to the fallback shell
+    (all None except industryAvgPe=15.0). The endpoint therefore
+    always responds HTTP 200 with a valid contract.
+    """
     try:
+        # ── 1. Ticker + info ─────────────────────────────────────
         ticker = yf.Ticker(symbol)
         info = ticker.info or {}
-    except Exception as exc:
-        logger.warning("risk-core: ticker.info failed for %s: %s", symbol, exc)
+
+        # ── 2. Valuation ─────────────────────────────────────────
+        pe = _safe(info.get("trailingPE"))
+        ps = _safe(info.get("priceToSalesTrailing12Months"))
+        forward_pe = _safe(info.get("forwardPE"))
+        sector = info.get("sector")
+        # Default to 15.0 (neutral baseline) when sector is unknown
+        industry_avg_pe = _SECTOR_PE_BENCHMARK.get(sector or "", 15.0)
+
+        # ── 3. Health ────────────────────────────────────────────
+        debt_to_equity = _normalise_debt_to_equity(_safe(info.get("debtToEquity")))
+        current_ratio = _safe(info.get("currentRatio"))
+
+        fcf = _safe(info.get("freeCashflow"))
+        market_cap = _safe(info.get("marketCap"))
+        fcf_yield: Optional[float] = None
+        if fcf is not None and market_cap is not None and market_cap > 0:
+            fcf_yield = round((fcf / market_cap) * 100.0, 2)
+
+        # ── 4. Growth (3Y CAGR from annual income statement) ─────
+        try:
+            eps_growth_3y, rev_growth_3y = _extract_3y_growth(ticker)
+        except Exception as growth_exc:
+            # Sub-failure: keep rest of the payload, null growth only
+            logger.debug("risk-core: 3Y growth calc failed for %s: %s", symbol, growth_exc)
+            eps_growth_3y = None
+            rev_growth_3y = None
+
+        payload = {
+            "valuation": {
+                "pe": _round(pe),
+                "ps": _round(ps),
+                "forwardPe": _round(forward_pe),
+                "industryAvgPe": industry_avg_pe,
+            },
+            "health": {
+                "debtToEquity": debt_to_equity,
+                "currentRatio": _round(current_ratio),
+                "fcfYield": fcf_yield,
+            },
+            "growth": {
+                "epsGrowth3Y": eps_growth_3y,
+                "revGrowth3Y": rev_growth_3y,
+            },
+        }
+
+        logger.info(
+            "risk-core: %s pe=%s ps=%s fwdPe=%s d/e=%s cr=%s fcfY=%s epsG=%s revG=%s",
+            symbol, pe, ps, forward_pe, debt_to_equity, current_ratio,
+            fcf_yield, eps_growth_3y, rev_growth_3y,
+        )
+        return payload
+
+    except Exception as e:
+        # Top-level safety net: yfinance / network / parsing / anything.
+        # We log loudly and return the all-null fallback so the frontend
+        # can still render the scorecard at zero.
+        print(f"Erreur fetch {symbol}: {e}")
+        logger.error("risk-core: fatal fetch error for %s: %s", symbol, e)
         return _empty_payload()
-
-    # ── Valuation ────────────────────────────────────────────────
-    pe = _safe(info.get("trailingPE"))
-    ps = _safe(info.get("priceToSalesTrailing12Months"))
-    forward_pe = _safe(info.get("forwardPE"))
-    sector = info.get("sector")
-    industry_avg_pe = _SECTOR_PE_BENCHMARK.get(sector or "")  # None if unknown
-
-    # ── Health ───────────────────────────────────────────────────
-    debt_to_equity = _normalise_debt_to_equity(_safe(info.get("debtToEquity")))
-    current_ratio = _safe(info.get("currentRatio"))
-
-    fcf = _safe(info.get("freeCashflow"))
-    market_cap = _safe(info.get("marketCap"))
-    fcf_yield: Optional[float] = None
-    if fcf is not None and market_cap is not None and market_cap > 0:
-        fcf_yield = round((fcf / market_cap) * 100.0, 2)
-
-    # ── Growth (3Y CAGR from annual income statement) ───────────
-    try:
-        eps_growth_3y, rev_growth_3y = _extract_3y_growth(ticker)
-    except Exception as exc:
-        logger.debug("risk-core: 3Y growth calc failed for %s: %s", symbol, exc)
-        eps_growth_3y = None
-        rev_growth_3y = None
-
-    payload = {
-        "valuation": {
-            "pe": _round(pe),
-            "ps": _round(ps),
-            "forwardPe": _round(forward_pe),
-            "industryAvgPe": industry_avg_pe,
-        },
-        "health": {
-            "debtToEquity": debt_to_equity,
-            "currentRatio": _round(current_ratio),
-            "fcfYield": fcf_yield,
-        },
-        "growth": {
-            "epsGrowth3Y": eps_growth_3y,
-            "revGrowth3Y": rev_growth_3y,
-        },
-    }
-
-    logger.info(
-        "risk-core: %s pe=%s ps=%s fwdPe=%s d/e=%s cr=%s fcfY=%s epsG=%s revG=%s",
-        symbol, pe, ps, forward_pe, debt_to_equity, current_ratio,
-        fcf_yield, eps_growth_3y, rev_growth_3y,
-    )
-    return payload
 
 
 # ── Public async API ─────────────────────────────────────────────
