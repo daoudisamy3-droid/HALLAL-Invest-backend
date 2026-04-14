@@ -171,6 +171,41 @@ class StrategicAnalysis(BaseModel):
     cached_at: Optional[str] = None
 
 
+# ── Analyze – Risk Core Engine (Phase 1) ─────────────────────────
+
+
+class ValuationBlock(BaseModel):
+    """Valuation metrics block. All values are raw ratios (not percentages)."""
+    pe: Optional[float] = None
+    ps: Optional[float] = None
+    forwardPe: Optional[float] = None
+    industryAvgPe: Optional[float] = None
+
+
+class HealthBlock(BaseModel):
+    """Financial health block. fcfYield expressed as percentage (6.2 → 6.2%)."""
+    debtToEquity: Optional[float] = None
+    currentRatio: Optional[float] = None
+    fcfYield: Optional[float] = None
+
+
+class GrowthBlock(BaseModel):
+    """3-year CAGR growth block. Values expressed as percentages (12.5 → 12.5%)."""
+    epsGrowth3Y: Optional[float] = None
+    revGrowth3Y: Optional[float] = None
+
+
+class RiskCore(BaseModel):
+    """
+    Risk Core Engine response – raw fundamentals for the ANALYZE tab.
+    The frontend owns all scoring logic; this endpoint is strictly a
+    data provider. Missing fields are returned as null (never 0).
+    """
+    valuation: ValuationBlock = ValuationBlock()
+    health: HealthBlock = HealthBlock()
+    growth: GrowthBlock = GrowthBlock()
+
+
 class AAOIFIAudit(BaseModel):
     """Complete AAOIFI audit response."""
     symbol: str
