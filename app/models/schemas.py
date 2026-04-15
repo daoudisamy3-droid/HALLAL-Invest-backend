@@ -206,6 +206,50 @@ class RiskCore(BaseModel):
     growth: GrowthBlock = GrowthBlock()
 
 
+# ── Analyze – Risk Scorecard Engine (PROD contract) ──────────────
+
+
+class RiskValuationPillar(BaseModel):
+    """Valuation pillar: backend-computed score + raw P/E context."""
+    score: Optional[int] = None
+    pe_ratio: Optional[float] = None
+    industry_avg: Optional[float] = None
+
+
+class RiskSolvencyPillar(BaseModel):
+    """Solvency pillar: backend-computed score + D/E and FCF yield."""
+    score: Optional[int] = None
+    debt_to_equity: Optional[float] = None
+    fcf_yield: Optional[float] = None
+
+
+class RiskGrowthPillar(BaseModel):
+    """Growth pillar: backend-computed score + 3Y EPS CAGR."""
+    score: Optional[int] = None
+    eps_growth_3y: Optional[float] = None
+
+
+class RiskPillars(BaseModel):
+    """The three scored pillars."""
+    valuation: RiskValuationPillar = RiskValuationPillar()
+    solvency: RiskSolvencyPillar = RiskSolvencyPillar()
+    growth: RiskGrowthPillar = RiskGrowthPillar()
+
+
+class RiskEngine(BaseModel):
+    """Aggregated risk scoring block."""
+    global_score: Optional[int] = None
+    status: str = "UNKNOWN"
+    pillars: RiskPillars = RiskPillars()
+
+
+class RiskScorecardResponse(BaseModel):
+    """Strict PROD contract for /analyze/{ticker}/risk."""
+    ticker: str
+    timestamp: str
+    risk_engine: RiskEngine = RiskEngine()
+
+
 # ── Analyze – Smart Peer Engine (Phase 2) ────────────────────────
 
 

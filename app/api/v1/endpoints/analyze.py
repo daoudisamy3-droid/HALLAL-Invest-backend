@@ -15,9 +15,13 @@ from app.core.logging import logger
 from app.core.security import rate_limit_dependency
 from app.models.schemas import (
     CompareChartResponse,
+    RiskScorecardResponse,
     SmartPeersResponse,
 )
-from app.services.analyze_service import _empty_payload, get_risk_core
+from app.services.analyze_service import (
+    _empty_scorecard,
+    get_risk_scorecard,
+)
 from app.services.peer_service import get_compare_chart, get_smart_peers
 
 router = APIRouter()
@@ -34,25 +38,30 @@ def _validate_symbol(symbol: str) -> str:
 
 @router.get(
     "/analyze/{ticker}/risk",
-    summary="Risk Core Engine – raw fundamentals",
+    response_model=RiskScorecardResponse,
+    summary="Risk Scorecard Engine – backend-computed pillar scores",
     description=(
-        "Returns the strict 3-block contract (valuation / health / growth) "
-        "used by the frontend Risk Scorecard algorithm. Data source: "
-        "yfinance (SSOT). 60-second in-memory cache. Missing fields are "
-        "returned as null (never 0). Always responds HTTP 200: any fetch "
-        "error collapses to the fallback payload so the frontend gauges "
-        "can render a neutral baseline."
+        "Returns the strict PROD contract "
+        "`{ticker, timestamp, risk_engine: {global_score, status, "
+        "pillars: {valuation, solvency, growth}}}`. "
+        "Each pillar carries a 0-100 score (low = safe) plus the raw "
+        "metrics used to compute it. Global score is a weighted blend "
+        "(valuation 35% · solvency 35% · growth 30%) with null-aware "
+        "renormalisation. Status is LOW_RISK (<40), MEDIUM_RISK (40-69), "
+        "HIGH_RISK (>=70). Data source: yfinance. 60s TTL cache. "
+        "Always 200: any fetch error collapses to a neutral null shell."
     ),
     dependencies=[Depends(rate_limit_dependency)],
 )
-async def analyze_risk(ticker: str) -> dict:
+async def analyze_risk(ticker: str) -> RiskScorecardResponse:
     ticker = _validate_symbol(ticker)
     try:
-        return await get_risk_core(ticker)
+        data = await get_risk_scorecard(ticker)
+        return RiskScorecardResponse(**data)
     except Exception as e:
         print(f"Erreur fetch {ticker}: {e}")
         logger.error("risk route: fatal error for %s: %s", ticker, e)
-        return _empty_payload()
+        return RiskScorecardResponse(**_empty_scorecard(ticker))
 
 
 # ── Phase 2 – Abyssal Arena ──────────────────────────────────────

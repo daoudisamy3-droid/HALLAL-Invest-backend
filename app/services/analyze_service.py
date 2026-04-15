@@ -285,3 +285,181 @@ async def get_risk_core(symbol: str) -> dict[str, Any]:
 
     _cache_set(symbol, data)
     return data
+
+
+# ── Scorecard Engine – PROD contract ─────────────────────────────
+#
+# Semantics: "low = safe" on a 0-100 scale.
+#   0-39   → LOW_RISK
+#   40-69  → MEDIUM_RISK
+#   70-100 → HIGH_RISK
+#
+# Pillar weights when computing the global score:
+#   valuation 35% · solvency 35% · growth 30%
+# Missing pillars are renormalised so the global score stays meaningful
+# even when some sub-metrics are unavailable.
+
+
+def _score_valuation(pe: Optional[float], industry_avg: Optional[float]) -> Optional[int]:
+    """
+    P/E relative to industry average.
+    ratio 1.0 → 50 (neutral)   ratio 0.5 → 30 (cheap, safer)
+    ratio 2.0 → 90 (expensive, riskier)
+    """
+    if pe is None or industry_avg is None or pe <= 0 or industry_avg <= 0:
+        return None
+    ratio = pe / industry_avg
+    raw = 50.0 + (ratio - 1.0) * 40.0
+    return int(max(0, min(100, round(raw))))
+
+
+def _score_solvency(
+    debt_to_equity: Optional[float],
+    fcf_yield: Optional[float],
+    current_ratio: Optional[float],
+) -> Optional[int]:
+    """
+    Blended solvency score from D/E, FCF yield and current ratio.
+    Lower is safer. Missing sub-metrics are skipped and the remainder
+    is averaged.
+    """
+    parts: list[float] = []
+    if debt_to_equity is not None:
+        # D/E: 0 → 0, 1 → 40, 2 → 80, >2.5 → 100
+        parts.append(max(0.0, min(100.0, debt_to_equity * 40.0)))
+    if fcf_yield is not None:
+        # FCF yield %: 0% → 70, 5% → 30, 10%+ → 0
+        parts.append(max(0.0, min(100.0, 70.0 - fcf_yield * 8.0)))
+    if current_ratio is not None:
+        # Current ratio: <1 → 80+, 2 → 30, >=3 → 0
+        parts.append(max(0.0, min(100.0, (2.0 - current_ratio) * 35.0 + 30.0)))
+    if not parts:
+        return None
+    return int(round(sum(parts) / len(parts)))
+
+
+def _score_growth(
+    eps_growth_3y: Optional[float],
+    rev_growth_3y: Optional[float],
+) -> Optional[int]:
+    """
+    3Y CAGR score. Positive growth reduces risk, contraction raises it.
+    +15% → ~15,  0% → 60,  -10% → ~90.
+    """
+    parts: list[float] = []
+    for g in (eps_growth_3y, rev_growth_3y):
+        if g is None:
+            continue
+        raw = 60.0 - g * 3.0
+        parts.append(max(0.0, min(100.0, raw)))
+    if not parts:
+        return None
+    return int(round(sum(parts) / len(parts)))
+
+
+def _global_score(
+    val_score: Optional[int],
+    sol_score: Optional[int],
+    growth_score: Optional[int],
+) -> Optional[int]:
+    """
+    Weighted composite with null-aware renormalisation.
+    Weights: valuation 35% · solvency 35% · growth 30%.
+    """
+    weighted: list[tuple[float, int]] = []
+    if val_score is not None:
+        weighted.append((0.35, val_score))
+    if sol_score is not None:
+        weighted.append((0.35, sol_score))
+    if growth_score is not None:
+        weighted.append((0.30, growth_score))
+    if not weighted:
+        return None
+    total_w = sum(w for w, _ in weighted)
+    if total_w <= 0:
+        return None
+    composite = sum(w * s for w, s in weighted) / total_w
+    return int(round(max(0.0, min(100.0, composite))))
+
+
+def _status_for(score: Optional[int]) -> str:
+    if score is None:
+        return "UNKNOWN"
+    if score < 40:
+        return "LOW_RISK"
+    if score < 70:
+        return "MEDIUM_RISK"
+    return "HIGH_RISK"
+
+
+def _build_scorecard(ticker: str, raw: dict[str, Any]) -> dict[str, Any]:
+    """
+    Transform the raw 3-block Risk Core payload into the strict PROD
+    scorecard contract expected by the ANALYZE tab.
+    """
+    val = raw.get("valuation", {}) or {}
+    health = raw.get("health", {}) or {}
+    growth = raw.get("growth", {}) or {}
+
+    pe_ratio = val.get("pe")
+    industry_avg = val.get("industryAvgPe")
+    debt_to_equity = health.get("debtToEquity")
+    fcf_yield = health.get("fcfYield")
+    current_ratio = health.get("currentRatio")
+    eps_growth_3y = growth.get("epsGrowth3Y")
+    rev_growth_3y = growth.get("revGrowth3Y")
+
+    val_score = _score_valuation(pe_ratio, industry_avg)
+    sol_score = _score_solvency(debt_to_equity, fcf_yield, current_ratio)
+    growth_score = _score_growth(eps_growth_3y, rev_growth_3y)
+    global_score = _global_score(val_score, sol_score, growth_score)
+    status = _status_for(global_score)
+
+    return {
+        "ticker": ticker,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "risk_engine": {
+            "global_score": global_score,
+            "status": status,
+            "pillars": {
+                "valuation": {
+                    "score": val_score,
+                    "pe_ratio": pe_ratio,
+                    "industry_avg": industry_avg,
+                },
+                "solvency": {
+                    "score": sol_score,
+                    "debt_to_equity": debt_to_equity,
+                    "fcf_yield": fcf_yield,
+                },
+                "growth": {
+                    "score": growth_score,
+                    "eps_growth_3y": eps_growth_3y,
+                },
+            },
+        },
+    }
+
+
+def _empty_scorecard(ticker: str) -> dict[str, Any]:
+    """Fallback scorecard when raw data cannot be fetched at all."""
+    return _build_scorecard(ticker, _empty_payload())
+
+
+async def get_risk_scorecard(ticker: str) -> dict[str, Any]:
+    """
+    Fetch raw Risk Core data and fold it into the strict PROD contract
+    `{ticker, timestamp, risk_engine: {global_score, status, pillars}}`.
+    Never raises: falls back to an all-null scorecard on any error.
+    """
+    try:
+        raw = await get_risk_core(ticker)
+    except Exception as exc:
+        logger.error("risk-scorecard: raw fetch failed for %s: %s", ticker, exc)
+        return _empty_scorecard(ticker)
+
+    try:
+        return _build_scorecard(ticker, raw)
+    except Exception as exc:
+        logger.error("risk-scorecard: build failed for %s: %s", ticker, exc)
+        return _empty_scorecard(ticker)
