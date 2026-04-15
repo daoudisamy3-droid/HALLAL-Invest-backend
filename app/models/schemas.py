@@ -206,6 +206,55 @@ class RiskCore(BaseModel):
     growth: GrowthBlock = GrowthBlock()
 
 
+# ── Analyze – Smart Peer Engine (Phase 2) ────────────────────────
+
+
+class SmartPeer(BaseModel):
+    """Single peer with risk score, raw metrics and a delta reason."""
+    ticker: str
+    name: Optional[str] = None
+    risk_score: Optional[float] = None
+    metrics: RiskCore = RiskCore()
+    delta_reason: str = ""
+
+
+class PeerRecommendation(BaseModel):
+    """The peer judged to offer the best risk/valuation balance."""
+    ticker: Optional[str] = None
+    name: Optional[str] = None
+    reason: str = ""
+
+
+class SmartPeersResponse(BaseModel):
+    """Response for /analyze/{ticker}/peers."""
+    ticker: str
+    name: Optional[str] = None
+    sector: Optional[str] = None
+    risk_score: Optional[float] = None
+    metrics: RiskCore = RiskCore()
+    peers: list[SmartPeer] = []
+    recommendation: PeerRecommendation = PeerRecommendation()
+
+
+class CompareChartPoint(BaseModel):
+    """Single base-100 normalised point on a compare chart."""
+    date: str
+    value: float
+
+
+class CompareChartSeries(BaseModel):
+    """One ticker's series inside the compare-chart payload."""
+    symbol: str
+    name: Optional[str] = None
+    series: list[CompareChartPoint] = []
+
+
+class CompareChartResponse(BaseModel):
+    """Response for /analyze/compare/chart – two base-100 series."""
+    ticker1: CompareChartSeries
+    ticker2: CompareChartSeries
+
+
 class AAOIFIAudit(BaseModel):
     """Complete AAOIFI audit response."""
     symbol: str
