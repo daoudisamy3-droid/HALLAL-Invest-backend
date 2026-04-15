@@ -396,29 +396,59 @@ def _pick_recommendation(
     source_score: Optional[float],
 ) -> dict[str, Any]:
     """
-    Winner = the peer with the highest composite of risk_score plus a
-    small valuation bonus (+10 if its P/E is strictly lower than the
-    source's ratio benchmark). Ties broken by raw risk_score.
+    Winner selection under strict "low = safe" semantics (0 = safest,
+    100 = riskiest).
+
+    Algorithm:
+      1. Filter out every peer whose risk_score is >= source_score.
+         Only peers strictly safer than the source can be recommended.
+      2. composite = peer.risk_score
+         If peer.metrics.valuation.pe < industryAvgPe: composite -= 10
+         (a good valuation LOWERS the risk composite).
+      3. Sort ascending (reverse=False); winner = candidates[0].
+      4. Peers missing data:
+           - risk_score = None   → excluded from the pool
+           - pe = None           → no bonus applied (neutral)
     """
     if not peers:
         return {"ticker": None, "name": None, "reason": ""}
 
+    # ── Step 1: filter to peers strictly safer than the source ──
+    valid = [p for p in peers if p.get("risk_score") is not None]
+    if source_score is not None:
+        candidates = [p for p in valid if p["risk_score"] < source_score]
+    else:
+        candidates = valid
+
+    if not candidates:
+        return {
+            "ticker": None,
+            "name": None,
+            "reason": "Aucun peer plus sûr que le ticker source",
+        }
+
+    # ── Step 2: composite (lower is better) ─────────────────────
     def _composite(p: dict[str, Any]) -> float:
-        base = p.get("risk_score") or 0.0
+        base = p["risk_score"]  # guaranteed not None by step 1 filter
         pe = p["metrics"]["valuation"].get("pe")
         ind = p["metrics"]["valuation"].get("industryAvgPe")
         val_bonus = 0.0
+        # Good valuation → subtract 10 (makes composite healthier)
         if pe is not None and ind is not None and pe > 0 and ind > 0 and pe < ind:
-            val_bonus = 10.0
+            val_bonus = -10.0
         return base + val_bonus
 
-    winner = max(peers, key=_composite)
-    reason_parts = []
+    # ── Step 3: sort ascending, take index 0 ────────────────────
+    candidates.sort(key=_composite)
+    winner = candidates[0]
+
+    # ── Step 4: build reason string ─────────────────────────────
+    reason_parts: list[str] = []
     if winner.get("risk_score") is not None:
-        reason_parts.append(f"Score risque {winner['risk_score']:.0f}/100")
+        reason_parts.append(f"Risque {winner['risk_score']:.0f}/100")
     if winner.get("delta_reason"):
         reason_parts.append(winner["delta_reason"])
-    reason = " · ".join(reason_parts) if reason_parts else "Meilleur équilibre risque / valorisation"
+    reason = " · ".join(reason_parts) if reason_parts else "Score risque le plus bas"
 
     return {
         "ticker": winner["ticker"],
