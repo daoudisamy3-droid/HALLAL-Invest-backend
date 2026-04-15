@@ -2,7 +2,12 @@
 Lightweight world-indices & commodities service.
 
 Uses yfinance for S&P 500, Nasdaq, CAC 40, DAX, Nikkei, Gold, Brent, NatGas, Silver, DXY.
-Includes a 60-second non-blocking TTL cache and closed-market last-close persistence.
+
+Intraday refactor: Strength (indices), Commodities and Energy fetchers now
+pull real-time prices via intraday history (5m bars) instead of relying on
+yfinance's potentially-stale `fast_info.lastPrice`. Each response item carries
+a `last_updated` ISO timestamp so the frontend can verify data freshness.
+The 60-second TTL cache is preserved (micro-caching) so Railway stays cheap.
 """
 
 import asyncio
@@ -40,6 +45,53 @@ def _cache_set(key: str, data: Any) -> None:
     _cache[key] = (datetime.now(timezone.utc).timestamp(), data)
 
 
+# ── Intraday snapshot helper ──────────────────────────────────────
+#
+# yfinance's `fast_info` can return stale end-of-day data. For the
+# Strength / Commodities / Energy modules we want *today's* price, so
+# we pull an intraday history window (5-minute bars, 1-day period)
+# and take the last available close. The bar's timestamp is returned
+# as `last_updated` so the frontend can verify freshness.
+#
+# Falls back to `fast_info.lastPrice` + now() if the intraday fetch
+# comes back empty (e.g. exotic tickers, weekend gaps).
+
+def _intraday_snapshot(
+    ticker: yf.Ticker,
+    fi: Any,
+    interval: str = "5m",
+) -> tuple[float, str]:
+    """
+    Return (last_price, last_updated_iso) for a ticker.
+
+    Primary source: ticker.history(period="1d", interval="5m"),
+    which reflects real intraday activity.
+    Fallback: fast_info.lastPrice + current UTC timestamp.
+    """
+    try:
+        hist = ticker.history(period="1d", interval=interval)
+        if hist is not None and not hist.empty:
+            close = hist["Close"].dropna()
+            if not close.empty:
+                last_ts = close.index[-1]
+                price = float(close.iloc[-1])
+                # pandas Timestamp may or may not be tz-aware
+                if hasattr(last_ts, "tz_convert") and last_ts.tzinfo is not None:
+                    iso = last_ts.tz_convert("UTC").isoformat()
+                elif hasattr(last_ts, "tz_localize"):
+                    try:
+                        iso = last_ts.tz_localize("UTC").isoformat()
+                    except (TypeError, ValueError):
+                        iso = last_ts.isoformat()
+                else:
+                    iso = str(last_ts)
+                return price, iso
+    except Exception as exc:
+        logger.debug("intraday snapshot fallback for %s: %s", ticker, exc)
+    # Fallback path
+    return float(fi["lastPrice"]), datetime.now(timezone.utc).isoformat()
+
+
 # ── Index registry ────────────────────────────────────────────────
 INDICES = {
     "^GSPC":  {"name": "S&P 500",    "exchange": "NYSE",    "tz": "America/New_York", "open": time(9, 30), "close": time(16, 0)},
@@ -64,14 +116,14 @@ _last_known: dict[str, dict[str, Any]] = {}
 
 
 def _fetch_single_index(symbol: str) -> dict[str, Any]:
-    """Blocking: fetch one index's current price + previous close."""
+    """Blocking: fetch one index's current price + previous close (intraday)."""
     meta = INDICES[symbol]
     is_open = _is_market_open(meta["tz"], meta["open"], meta["close"])
     try:
         ticker = yf.Ticker(symbol)
         fi = ticker.fast_info
-        price = float(fi["lastPrice"])
         prev_close = float(fi["previousClose"])
+        price, last_updated = _intraday_snapshot(ticker, fi, interval="5m")
         change = round(price - prev_close, 2)
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
 
@@ -84,6 +136,7 @@ def _fetch_single_index(symbol: str) -> dict[str, Any]:
             "change": change,
             "change_pct": change_pct,
             "is_open": is_open,
+            "last_updated": last_updated,
         }
         _last_known[symbol] = result
         return result
@@ -101,6 +154,7 @@ def _fetch_single_index(symbol: str) -> dict[str, Any]:
             "change": None,
             "change_pct": None,
             "is_open": is_open,
+            "last_updated": None,
             "error": str(exc),
         }
 
@@ -274,14 +328,14 @@ def _is_cme_open() -> bool:
 
 
 def _fetch_single_commodity(symbol: str) -> dict[str, Any]:
-    """Blocking: fetch one commodity's price + daily change."""
+    """Blocking: fetch one commodity's price + daily change (intraday)."""
     meta = COMMODITIES[symbol]
     is_open = _is_cme_open()
     try:
         ticker = yf.Ticker(symbol)
         fi = ticker.fast_info
-        price = float(fi["lastPrice"])
         prev_close = float(fi["previousClose"])
+        price, last_updated = _intraday_snapshot(ticker, fi, interval="5m")
         change = round(price - prev_close, 2)
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
 
@@ -294,6 +348,7 @@ def _fetch_single_commodity(symbol: str) -> dict[str, Any]:
             "change": change,
             "change_pct": change_pct,
             "is_open": is_open,
+            "last_updated": last_updated,
         }
         _last_known_commodity[symbol] = result
         return result
@@ -311,6 +366,7 @@ def _fetch_single_commodity(symbol: str) -> dict[str, Any]:
             "change": None,
             "change_pct": None,
             "is_open": is_open,
+            "last_updated": None,
             "error": str(exc),
         }
 
@@ -563,14 +619,14 @@ _last_known_energy: dict[str, dict[str, Any]] = {}
 
 
 def _fetch_single_energy(symbol: str) -> dict[str, Any]:
-    """Blocking: fetch one energy ticker's price + daily change."""
+    """Blocking: fetch one energy ticker's price + daily change (intraday)."""
     meta = ENERGY_TICKERS[symbol]
     is_open = _is_cme_open()
     try:
         ticker = yf.Ticker(symbol)
         fi = ticker.fast_info
-        price = float(fi["lastPrice"])
         prev_close = float(fi["previousClose"])
+        price, last_updated = _intraday_snapshot(ticker, fi, interval="5m")
         change = round(price - prev_close, 2)
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
 
@@ -583,6 +639,7 @@ def _fetch_single_energy(symbol: str) -> dict[str, Any]:
             "change": change,
             "change_pct": change_pct,
             "is_open": is_open,
+            "last_updated": last_updated,
         }
         _last_known_energy[symbol] = result
         return result
@@ -600,6 +657,7 @@ def _fetch_single_energy(symbol: str) -> dict[str, Any]:
             "change": None,
             "change_pct": None,
             "is_open": is_open,
+            "last_updated": None,
             "error": str(exc),
         }
 
@@ -718,14 +776,14 @@ _last_known_energy_table: dict[str, dict[str, Any]] = {}
 
 
 def _fetch_energy_table_row(symbol: str) -> dict[str, Any]:
-    """Blocking: fetch one energy ticker with high/low for the table view."""
+    """Blocking: fetch one energy ticker with high/low for the table view (intraday)."""
     meta = _ENERGY_TABLE_TICKERS[symbol]
     is_open = _is_cme_open()
     try:
         ticker = yf.Ticker(symbol)
         fi = ticker.fast_info
-        price = float(fi["lastPrice"])
         prev_close = float(fi["previousClose"])
+        price, last_updated = _intraday_snapshot(ticker, fi, interval="5m")
         change = round(price - prev_close, 2)
         change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
         day_high = round(float(fi["dayHigh"]), 2) if fi.get("dayHigh") else None
@@ -742,6 +800,7 @@ def _fetch_energy_table_row(symbol: str) -> dict[str, Any]:
             "day_high": day_high,
             "day_low": day_low,
             "is_open": is_open,
+            "last_updated": last_updated,
         }
         _last_known_energy_table[symbol] = result
         return result
@@ -761,6 +820,7 @@ def _fetch_energy_table_row(symbol: str) -> dict[str, Any]:
             "day_high": None,
             "day_low": None,
             "is_open": is_open,
+            "last_updated": None,
             "error": str(exc),
         }
 
