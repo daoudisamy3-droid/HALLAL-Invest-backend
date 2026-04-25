@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Depends
 
+from app.core.cache import cache_get, cache_set
 from app.core.logging import logger
 from app.core.security import rate_limit_dependency
 from app.integration import yfinance_client
@@ -17,10 +18,8 @@ from app.models.schemas import (
 
 router = APIRouter()
 
-# ── 24h in-memory caches ──────────────────────────────────────────
-_audit_cache: dict[str, tuple[float, AAOIFIAudit]] = {}
-_strategic_cache: dict[str, tuple[float, StrategicAnalysis]] = {}
-_CACHE_TTL = 86400  # 24 hours
+_TICKER_CACHE_NS = "ticker"
+_TICKER_CACHE_TTL = 86400  # 24 hours
 
 
 # ── Formatting helpers ────────────────────────────────────────────
@@ -150,15 +149,11 @@ async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
-    # Check cache
-    now = time.time()
-    if symbol in _audit_cache:
-        cached_at, cached_result = _audit_cache[symbol]
-        if now - cached_at < _CACHE_TTL:
-            logger.info("AAOIFI audit cache hit for %s", symbol)
-            return cached_result
+    cached = cache_get(_TICKER_CACHE_NS, f"audit:{symbol}")
+    if cached is not None:
+        logger.info("AAOIFI audit cache hit for %s", symbol)
+        return AAOIFIAudit(**cached)
 
-    # Run audit
     from app.services.shariah_audit import run_aaoifi_audit
     try:
         result = await run_aaoifi_audit(symbol)
@@ -169,8 +164,7 @@ async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
             detail=f"AAOIFI audit failed for '{symbol}': {exc}",
         )
 
-    # Store in cache
-    _audit_cache[symbol] = (now, result)
+    cache_set(_TICKER_CACHE_NS, f"audit:{symbol}", result.model_dump(), ttl=_TICKER_CACHE_TTL)
     logger.info("AAOIFI audit cached for %s (TTL=24h)", symbol)
 
     return result
@@ -191,18 +185,13 @@ async def get_strategic_analysis(symbol: str) -> StrategicAnalysis:
     if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
-    # Check cache
-    now = time.time()
-    if symbol in _strategic_cache:
-        cached_at, cached_result = _strategic_cache[symbol]
-        if now - cached_at < _CACHE_TTL:
-            logger.info("Strategic analysis cache hit for %s", symbol)
-            return cached_result
+    cached = cache_get(_TICKER_CACHE_NS, f"strategic:{symbol}")
+    if cached is not None:
+        logger.info("Strategic analysis cache hit for %s", symbol)
+        return StrategicAnalysis(**cached)
 
     from app.services.strategic_analysis import run_strategic_analysis
 
-    # Always return 200 — run_strategic_analysis never raises,
-    # but we guard against unexpected errors anyway.
     try:
         result = await run_strategic_analysis(symbol)
     except Exception as exc:
@@ -215,7 +204,7 @@ async def get_strategic_analysis(symbol: str) -> StrategicAnalysis:
             cached_at=datetime.now(timezone.utc).isoformat(),
         )
 
-    _strategic_cache[symbol] = (now, result)
+    cache_set(_TICKER_CACHE_NS, f"strategic:{symbol}", result.model_dump(), ttl=_TICKER_CACHE_TTL)
     logger.info("Strategic analysis cached for %s (TTL=24h)", symbol)
 
     return result

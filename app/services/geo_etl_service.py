@@ -19,11 +19,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.core.cache import cache_get as _central_cache_get, cache_set as _central_cache_set
+
 logger = logging.getLogger(__name__)
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "layers"
 
 _EMPTY_FC: dict[str, Any] = {"type": "FeatureCollection", "features": []}
+
+_GEO_CACHE_NS = "geo"
+_GEO_CACHE_TTL = 86_400  # 24 hours
 
 # Fallback cap_kbpd by layer category
 _CAP_DEFAULTS: dict[str, int] = {
@@ -32,10 +37,6 @@ _CAP_DEFAULTS: dict[str, int] = {
     "refineries_lng": 200,
     "offshore_platforms": 50,
 }
-
-# 24-hour in-memory cache
-_CACHE_TTL = 86_400  # seconds
-_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 # ── Minification ────────────────────────────────────────────────
@@ -113,27 +114,13 @@ def _minify_collection(data: dict, layer: str) -> dict[str, Any]:
 # ── Load + cache ────────────────────────────────────────────────
 
 
-def _cache_get(key: str) -> dict[str, Any] | None:
-    entry = _cache.get(key)
-    if entry is None:
-        return None
-    ts, data = entry
-    if (datetime.now(timezone.utc).timestamp() - ts) > _CACHE_TTL:
-        return None
-    return data
-
-
-def _cache_set(key: str, data: dict[str, Any]) -> None:
-    _cache[key] = (datetime.now(timezone.utc).timestamp(), data)
-
-
 def _load_layer(layer: str) -> dict[str, Any]:
     """
     Load a GeoJSON layer from disk, minify, and cache.
 
     Never raises – returns empty FeatureCollection on any error.
     """
-    cached = _cache_get(layer)
+    cached = _central_cache_get(_GEO_CACHE_NS, layer)
     if cached is not None:
         return cached
 
@@ -157,7 +144,7 @@ def _load_layer(layer: str) -> dict[str, Any]:
         logger.error("layer %s: unexpected error – %s", layer, exc)
         result = _EMPTY_FC
 
-    _cache_set(layer, result)
+    _central_cache_set(_GEO_CACHE_NS, layer, result, ttl=_GEO_CACHE_TTL)
     return result
 
 

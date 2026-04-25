@@ -6,8 +6,8 @@ fetch, normalise, and return the 3-block contract (valuation / health /
 growth). yfinance is the single source of truth. Missing fields are
 returned as None so the frontend can show null placeholders.
 
-60-second TTL in-memory cache per symbol. Never raises: any exception
-during fetch collapses to an all-null payload.
+60-second TTL via the centralized cache (Redis-capable).
+Never raises: any exception during fetch collapses to an all-null payload.
 """
 
 from __future__ import annotations
@@ -20,9 +20,13 @@ from typing import Any, Optional
 import pandas as pd
 import yfinance as yf
 
+from app.core.cache import cache_get, cache_set
 from app.core.logging import logger
 
 _executor = ThreadPoolExecutor(max_workers=4)
+
+_RISK_CACHE_NS = "risk"
+_RISK_CACHE_TTL = 60
 
 
 # ── Sector P/E benchmarks (industryAvgPe surrogate) ──────────────
@@ -43,26 +47,6 @@ _SECTOR_PE_BENCHMARK: dict[str, float] = {
     "Real Estate": 25.0,
     "Basic Materials": 16.0,
 }
-
-
-# ── 60-second TTL cache ──────────────────────────────────────────
-
-_CACHE_TTL = 60  # seconds
-_risk_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-
-
-def _cache_get(symbol: str) -> Optional[dict[str, Any]]:
-    entry = _risk_cache.get(symbol)
-    if entry is None:
-        return None
-    ts, data = entry
-    if (datetime.now(timezone.utc).timestamp() - ts) > _CACHE_TTL:
-        return None
-    return data
-
-
-def _cache_set(symbol: str, data: dict[str, Any]) -> None:
-    _risk_cache[symbol] = (datetime.now(timezone.utc).timestamp(), data)
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -269,9 +253,9 @@ def _fetch_risk_blocking(symbol: str) -> dict[str, Any]:
 async def get_risk_core(symbol: str) -> dict[str, Any]:
     """
     Fetch the Risk Core contract (valuation / health / growth).
-    60s in-memory cache. Never raises – returns all-null shell on error.
+    60s centralized cache. Never raises – returns all-null shell on error.
     """
-    cached = _cache_get(symbol)
+    cached = cache_get(_RISK_CACHE_NS, symbol)
     if cached is not None:
         logger.info("risk-core: cache hit for %s", symbol)
         return cached
@@ -283,7 +267,7 @@ async def get_risk_core(symbol: str) -> dict[str, Any]:
         logger.error("risk-core: unexpected error for %s: %s", symbol, exc)
         data = _empty_payload()
 
-    _cache_set(symbol, data)
+    cache_set(_RISK_CACHE_NS, symbol, data, ttl=_RISK_CACHE_TTL)
     return data
 
 

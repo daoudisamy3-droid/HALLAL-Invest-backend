@@ -24,8 +24,15 @@ from typing import Any, Optional
 import pandas as pd
 import yfinance as yf
 
+from app.core.cache import cache_get, cache_set
 from app.core.logging import logger
-from app.services.analyze_service import get_risk_core
+from app.services.analyze_service import (
+    get_risk_core,
+    _score_valuation as _ssot_score_valuation,
+    _score_solvency as _ssot_score_solvency,
+    _score_growth as _ssot_score_growth,
+    _global_score as _ssot_global_score,
+)
 
 _executor = ThreadPoolExecutor(max_workers=6)
 
@@ -81,25 +88,11 @@ _SECTOR_PEERS: dict[str, list[str]] = {
 }
 
 
-# ── 5-minute TTL caches ──────────────────────────────────────────
+# ── 5-minute TTL via centralized cache ───────────────────────────
 
-_CACHE_TTL = 300  # 5 minutes
-_peer_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-_chart_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-
-
-def _cache_get(store: dict, key: str) -> Optional[dict[str, Any]]:
-    entry = store.get(key)
-    if entry is None:
-        return None
-    ts, data = entry
-    if (datetime.now(timezone.utc).timestamp() - ts) > _CACHE_TTL:
-        return None
-    return data
-
-
-def _cache_set(store: dict, key: str, data: dict[str, Any]) -> None:
-    store[key] = (datetime.now(timezone.utc).timestamp(), data)
+_PEER_CACHE_NS = "peers"
+_CHART_CACHE_NS = "chart"
+_PEER_CACHE_TTL = 300  # 5 minutes
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -115,10 +108,6 @@ def _safe(val: Any) -> Optional[float]:
         return f
     except (ValueError, TypeError):
         return None
-
-
-def _clamp(val: float, lo: float = 0.0, hi: float = 100.0) -> float:
-    return max(lo, min(hi, val))
 
 
 def _fetch_profile_blocking(symbol: str) -> dict[str, Any]:
@@ -143,103 +132,35 @@ async def _get_profile(symbol: str) -> dict[str, Any]:
     return await loop.run_in_executor(_executor, _fetch_profile_blocking, symbol)
 
 
-# ── Scoring engine (backend-side for peer ranking) ──────────────
-
-
-def _score_valuation(pe: Optional[float], industry_pe: Optional[float]) -> Optional[float]:
-    """0-100. P/E = 0 → 100; P/E = industry_pe → 50; P/E >= 2*industry_pe → 0."""
-    if pe is None or industry_pe is None or pe <= 0 or industry_pe <= 0:
-        return None
-    ratio = pe / industry_pe
-    return round(_clamp(100.0 - 50.0 * ratio), 2)
-
-
-def _score_health(
-    d2e: Optional[float],
-    cr: Optional[float],
-    fcf_yield: Optional[float],
-) -> Optional[float]:
-    """Average of debt-to-equity, current ratio and FCF-yield sub-scores."""
-    subs: list[float] = []
-
-    if d2e is not None:
-        # 0 → 100, 1 → ~67, 2 → ~33, 3+ → 0
-        subs.append(_clamp(100.0 - 33.33 * d2e))
-
-    if cr is not None:
-        # <1 → 0-50 linear ; 1 → 50 ; 2+ → 100
-        if cr < 1.0:
-            subs.append(_clamp(50.0 * cr))
-        else:
-            subs.append(_clamp(50.0 + 50.0 * (cr - 1.0)))
-
-    if fcf_yield is not None:
-        # 0% → 0 ; 5% → 50 ; 10%+ → 100
-        subs.append(_clamp(fcf_yield * 10.0))
-
-    if not subs:
-        return None
-    return round(sum(subs) / len(subs), 2)
-
-
-def _score_growth(
-    eps_g: Optional[float],
-    rev_g: Optional[float],
-) -> Optional[float]:
-    """
-    Piecewise linear on the average of EPS and revenue 3Y CAGR.
-    -20% → 0, 0% → 40, 10% → 70, 25%+ → 100.
-    """
-    growths = [g for g in (eps_g, rev_g) if g is not None]
-    if not growths:
-        return None
-    g = sum(growths) / len(growths)
-
-    if g <= -20.0:
-        return 0.0
-    if g <= 0.0:
-        return round(_clamp(40.0 * (g + 20.0) / 20.0), 2)
-    if g <= 10.0:
-        return round(_clamp(40.0 + 3.0 * g), 2)
-    if g <= 25.0:
-        return round(_clamp(70.0 + 2.0 * (g - 10.0)), 2)
-    return 100.0
+# ── Scoring engine (SSOT — delegates to analyze_service) ─────────
+#
+# Unified "low = safe" semantics: 0 = safest, 100 = riskiest.
+# The scoring functions are defined once in analyze_service and
+# reused here to guarantee a single source of truth.
 
 
 def _compute_risk_score(metrics: dict[str, Any]) -> Optional[float]:
     """
-    Weighted total: 35% valuation + 35% health + 30% growth.
-    Missing sub-scores are dropped and the remaining weights are
-    renormalised so a partial score is still returned.
+    Weighted total: 35% valuation + 35% solvency + 30% growth.
+    Delegates to the SSOT scoring functions in analyze_service.
+    Returns 0-100 (low = safe).
     """
-    val = _score_valuation(
+    val = _ssot_score_valuation(
         metrics["valuation"].get("pe"),
         metrics["valuation"].get("industryAvgPe"),
     )
-    health = _score_health(
+    solvency = _ssot_score_solvency(
         metrics["health"].get("debtToEquity"),
-        metrics["health"].get("currentRatio"),
         metrics["health"].get("fcfYield"),
+        metrics["health"].get("currentRatio"),
     )
-    growth = _score_growth(
+    growth = _ssot_score_growth(
         metrics["growth"].get("epsGrowth3Y"),
         metrics["growth"].get("revGrowth3Y"),
     )
 
-    components: list[tuple[float, float]] = []
-    if val is not None:
-        components.append((0.35, val))
-    if health is not None:
-        components.append((0.35, health))
-    if growth is not None:
-        components.append((0.30, growth))
-
-    if not components:
-        return None
-
-    total_weight = sum(w for w, _ in components)
-    weighted = sum(w * s for w, s in components)
-    return round(weighted / total_weight, 2)
+    score = _ssot_global_score(val, solvency, growth)
+    return float(score) if score is not None else None
 
 
 # ── Delta reasons (French copy for the frontend) ─────────────────
@@ -315,7 +236,7 @@ async def get_smart_peers(ticker: str) -> dict[str, Any]:
     with risk_score / metrics / delta_reason, plus a recommendation.
     """
     ticker = ticker.upper().strip()
-    cached = _cache_get(_peer_cache, ticker)
+    cached = cache_get(_PEER_CACHE_NS, ticker)
     if cached is not None:
         logger.info("peer_service: cache hit for %s", ticker)
         return cached
@@ -380,7 +301,7 @@ async def get_smart_peers(ticker: str) -> dict[str, Any]:
         "recommendation": recommendation,
     }
 
-    _cache_set(_peer_cache, ticker, payload)
+    cache_set(_PEER_CACHE_NS, ticker, payload, ttl=_PEER_CACHE_TTL)
     logger.info(
         "peer_service: %s sector=%s peers=%s source_score=%s reco=%s",
         ticker, sector,
@@ -503,7 +424,7 @@ async def get_compare_chart(ticker1: str, ticker2: str) -> dict[str, Any]:
     t1 = ticker1.upper().strip()
     t2 = ticker2.upper().strip()
     cache_key = f"{t1}|{t2}"
-    cached = _cache_get(_chart_cache, cache_key)
+    cached = cache_get(_CHART_CACHE_NS, cache_key)
     if cached is not None:
         logger.info("compare_chart: cache hit for %s", cache_key)
         return cached
@@ -537,7 +458,7 @@ async def get_compare_chart(ticker1: str, ticker2: str) -> dict[str, Any]:
         },
     }
 
-    _cache_set(_chart_cache, cache_key, payload)
+    cache_set(_CHART_CACHE_NS, cache_key, payload, ttl=_PEER_CACHE_TTL)
     logger.info(
         "compare_chart: %s=%d pts, %s=%d pts",
         t1, len(payload["ticker1"]["series"]),

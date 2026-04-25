@@ -17,32 +17,18 @@ from typing import Any, Optional
 
 import yfinance as yf
 
+from app.core.cache import cache_get, cache_set
 from app.core.logging import logger
 
 _executor = ThreadPoolExecutor(max_workers=5)
+
+_MACRO_CACHE_NS = "macro"
+_MACRO_CACHE_TTL = 60
 
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
-
-# ── Lightweight TTL cache (60s, non-blocking) ─────────────────────
-_CACHE_TTL = 60  # seconds
-_cache: dict[str, tuple[float, Any]] = {}
-
-
-def _cache_get(key: str) -> Optional[Any]:
-    entry = _cache.get(key)
-    if entry is None:
-        return None
-    ts, data = entry
-    if (datetime.now(timezone.utc).timestamp() - ts) > _CACHE_TTL:
-        return None
-    return data
-
-
-def _cache_set(key: str, data: Any) -> None:
-    _cache[key] = (datetime.now(timezone.utc).timestamp(), data)
 
 
 # ── Intraday snapshot helper ──────────────────────────────────────
@@ -94,11 +80,13 @@ def _intraday_snapshot(
 
 # ── Index registry ────────────────────────────────────────────────
 INDICES = {
-    "^GSPC":  {"name": "S&P 500",    "exchange": "NYSE",    "tz": "America/New_York", "open": time(9, 30), "close": time(16, 0)},
-    "^NDX":   {"name": "Nasdaq 100", "exchange": "NASDAQ",  "tz": "America/New_York", "open": time(9, 30), "close": time(16, 0)},
-    "^FCHI":  {"name": "CAC 40",     "exchange": "Euronext", "tz": "Europe/Paris",     "open": time(9, 0),  "close": time(17, 30)},
-    "^GDAXI": {"name": "DAX",        "exchange": "XETRA",   "tz": "Europe/Berlin",    "open": time(9, 0),  "close": time(17, 30)},
-    "^N225":  {"name": "Nikkei 225", "exchange": "TSE",     "tz": "Asia/Tokyo",       "open": time(9, 0),  "close": time(15, 0)},
+    "^GSPC":    {"name": "S&P 500",       "exchange": "NYSE",    "tz": "America/New_York", "open": time(9, 30), "close": time(16, 0)},
+    "^NDX":     {"name": "Nasdaq 100",    "exchange": "NASDAQ",  "tz": "America/New_York", "open": time(9, 30), "close": time(16, 0)},
+    "^FTSE":    {"name": "FTSE 100",      "exchange": "LSE",     "tz": "Europe/London",    "open": time(8, 0),  "close": time(16, 30)},
+    "^FCHI":    {"name": "CAC 40",        "exchange": "Euronext", "tz": "Europe/Paris",     "open": time(9, 0),  "close": time(17, 30)},
+    "^GDAXI":   {"name": "DAX",           "exchange": "XETRA",   "tz": "Europe/Berlin",    "open": time(9, 0),  "close": time(17, 30)},
+    "^N225":    {"name": "Nikkei 225",    "exchange": "TSE",     "tz": "Asia/Tokyo",       "open": time(9, 0),  "close": time(15, 0)},
+    "DX-Y.NYB": {"name": "Dollar Index",  "exchange": "ICE",     "tz": "America/New_York", "open": time(8, 0),  "close": time(17, 0)},
 }
 
 
@@ -125,7 +113,7 @@ def _fetch_single_index(symbol: str) -> dict[str, Any]:
         prev_close = float(fi["previousClose"])
         price, last_updated = _intraday_snapshot(ticker, fi, interval="5m")
         change = round(price - prev_close, 2)
-        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else None
 
         result = {
             "symbol": symbol,
@@ -161,7 +149,7 @@ def _fetch_single_index(symbol: str) -> dict[str, Any]:
 
 async def get_world_indices() -> list[dict[str, Any]]:
     """Fetch all world indices in parallel (60s TTL cache)."""
-    cached = _cache_get("world_indices")
+    cached = cache_get(_MACRO_CACHE_NS, "world_indices")
     if cached is not None:
         return cached
 
@@ -171,18 +159,20 @@ async def get_world_indices() -> list[dict[str, Any]]:
         for sym in INDICES
     ]
     results = list(await asyncio.gather(*tasks))
-    _cache_set("world_indices", results)
+    cache_set(_MACRO_CACHE_NS, "world_indices", results, ttl=_MACRO_CACHE_TTL)
     return results
 
 
 # ── 24h Follow-the-Sun comparison (Base 0 per session open) ───────
 
 _CHART_KEYS: dict[str, str] = {
-    "^GSPC":  "US500",
-    "^NDX":   "NDX100",
-    "^FCHI":  "FR40",
-    "^GDAXI": "DE40",
-    "^N225":  "JP225",
+    "^GSPC":    "US500",
+    "^NDX":     "NDX100",
+    "^FTSE":    "UK100",
+    "^FCHI":    "FR40",
+    "^GDAXI":   "DE40",
+    "^N225":    "JP225",
+    "DX-Y.NYB": "DXY",
 }
 
 
@@ -273,7 +263,7 @@ async def get_comparison_data() -> list[dict[str, Any]]:
 
     [{time: "00:15", JP225: 0.3}, {time: "09:00", FR40: 0, DE40: 0}, ...]
     """
-    cached = _cache_get("indices_comparison")
+    cached = cache_get(_MACRO_CACHE_NS, "indices_comparison")
     if cached is not None:
         return cached
 
@@ -287,7 +277,7 @@ async def get_comparison_data() -> list[dict[str, Any]]:
         raw[sym] = await task
 
     result = _merge_to_flat_rows(raw, _CHART_KEYS)
-    _cache_set("indices_comparison", result)
+    cache_set(_MACRO_CACHE_NS, "indices_comparison", result, ttl=_MACRO_CACHE_TTL)
     return result
 
 
@@ -337,7 +327,7 @@ def _fetch_single_commodity(symbol: str) -> dict[str, Any]:
         prev_close = float(fi["previousClose"])
         price, last_updated = _intraday_snapshot(ticker, fi, interval="5m")
         change = round(price - prev_close, 2)
-        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else None
 
         result = {
             "symbol": symbol,
@@ -373,7 +363,7 @@ def _fetch_single_commodity(symbol: str) -> dict[str, Any]:
 
 async def get_commodities_data() -> list[dict[str, Any]]:
     """Fetch all commodity + DXY snapshots in parallel (60s TTL cache)."""
-    cached = _cache_get("commodities")
+    cached = cache_get(_MACRO_CACHE_NS, "commodities")
     if cached is not None:
         return cached
 
@@ -383,7 +373,7 @@ async def get_commodities_data() -> list[dict[str, Any]]:
         for sym in COMMODITIES
     ]
     results = list(await asyncio.gather(*tasks))
-    _cache_set("commodities", results)
+    cache_set(_MACRO_CACHE_NS, "commodities", results, ttl=_MACRO_CACHE_TTL)
     return results
 
 
@@ -431,7 +421,7 @@ async def get_commodities_comparison() -> list[dict[str, Any]]:
 
     [{time: "00:15", GOLD: 0.1, BRENT: -0.3, DXY: 0.05, ...}, ...]
     """
-    cached = _cache_get("commodities_comparison")
+    cached = cache_get(_MACRO_CACHE_NS, "commodities_comparison")
     if cached is not None:
         return cached
 
@@ -445,7 +435,7 @@ async def get_commodities_comparison() -> list[dict[str, Any]]:
         raw[sym] = await task
 
     result = _merge_to_flat_rows(raw, _COMMODITY_KEYS)
-    _cache_set("commodities_comparison", result)
+    cache_set(_MACRO_CACHE_NS, "commodities_comparison", result, ttl=_MACRO_CACHE_TTL)
     return result
 
 
@@ -487,7 +477,7 @@ def _fetch_single_risk(symbol: str) -> dict[str, Any]:
         price = float(fi["lastPrice"])
         prev_close = float(fi["previousClose"])
         change = round(price - prev_close, 2)
-        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else None
 
         signal = _risk_signal(symbol, round(price, 2), change_pct)
 
@@ -525,7 +515,7 @@ def _fetch_single_risk(symbol: str) -> dict[str, Any]:
 
 async def get_risk_data() -> list[dict[str, Any]]:
     """Fetch VIX + US10Y snapshots in parallel (60s TTL cache)."""
-    cached = _cache_get("risk")
+    cached = cache_get(_MACRO_CACHE_NS, "risk")
     if cached is not None:
         return cached
 
@@ -535,7 +525,7 @@ async def get_risk_data() -> list[dict[str, Any]]:
         for sym in RISK_TICKERS
     ]
     results = list(await asyncio.gather(*tasks))
-    _cache_set("risk", results)
+    cache_set(_MACRO_CACHE_NS, "risk", results, ttl=_MACRO_CACHE_TTL)
     return results
 
 
@@ -583,7 +573,7 @@ async def get_risk_comparison() -> list[dict[str, Any]]:
 
     [{time: "09:45", VIX: 1.2, US10Y: -0.3}, ...]
     """
-    cached = _cache_get("risk_comparison")
+    cached = cache_get(_MACRO_CACHE_NS, "risk_comparison")
     if cached is not None:
         return cached
 
@@ -597,7 +587,7 @@ async def get_risk_comparison() -> list[dict[str, Any]]:
         raw[sym] = await task
 
     result = _merge_to_flat_rows(raw, _RISK_KEYS)
-    _cache_set("risk_comparison", result)
+    cache_set(_MACRO_CACHE_NS, "risk_comparison", result, ttl=_MACRO_CACHE_TTL)
     return result
 
 
@@ -628,7 +618,7 @@ def _fetch_single_energy(symbol: str) -> dict[str, Any]:
         prev_close = float(fi["previousClose"])
         price, last_updated = _intraday_snapshot(ticker, fi, interval="5m")
         change = round(price - prev_close, 2)
-        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else None
 
         result = {
             "symbol": symbol,
@@ -664,7 +654,7 @@ def _fetch_single_energy(symbol: str) -> dict[str, Any]:
 
 async def get_energy_data() -> list[dict[str, Any]]:
     """Fetch energy snapshots in parallel (60s TTL cache)."""
-    cached = _cache_get("energy")
+    cached = cache_get(_MACRO_CACHE_NS, "energy")
     if cached is not None:
         return cached
 
@@ -674,7 +664,7 @@ async def get_energy_data() -> list[dict[str, Any]]:
         for sym in ENERGY_TICKERS
     ]
     results = list(await asyncio.gather(*tasks))
-    _cache_set("energy", results)
+    cache_set(_MACRO_CACHE_NS, "energy", results, ttl=_MACRO_CACHE_TTL)
     return results
 
 
@@ -716,7 +706,7 @@ def _fetch_energy_intraday(symbol: str) -> Optional[list[tuple[str, float]]]:
 
 async def get_energy_comparison() -> list[dict[str, Any]]:
     """24h energy comparison for LineChart (60s TTL cache)."""
-    cached = _cache_get("energy_comparison")
+    cached = cache_get(_MACRO_CACHE_NS, "energy_comparison")
     if cached is not None:
         return cached
 
@@ -730,7 +720,7 @@ async def get_energy_comparison() -> list[dict[str, Any]]:
         raw[sym] = await task
 
     result = _merge_to_flat_rows(raw, _ENERGY_KEYS)
-    _cache_set("energy_comparison", result)
+    cache_set(_MACRO_CACHE_NS, "energy_comparison", result, ttl=_MACRO_CACHE_TTL)
     return result
 
 
@@ -745,7 +735,7 @@ async def get_energy_chart() -> list[dict[str, Any]]:
 
     [{time: "09:30", WTI: 0.3, XLE: 0.1}, ...]
     """
-    cached = _cache_get("energy_chart")
+    cached = cache_get(_MACRO_CACHE_NS, "energy_chart")
     if cached is not None:
         return cached
 
@@ -759,7 +749,7 @@ async def get_energy_chart() -> list[dict[str, Any]]:
         raw[sym] = await task
 
     result = _merge_to_flat_rows(raw, _ENERGY_CHART_TICKERS)
-    _cache_set("energy_chart", result)
+    cache_set(_MACRO_CACHE_NS, "energy_chart", result, ttl=_MACRO_CACHE_TTL)
     return result
 
 
@@ -785,7 +775,7 @@ def _fetch_energy_table_row(symbol: str) -> dict[str, Any]:
         prev_close = float(fi["previousClose"])
         price, last_updated = _intraday_snapshot(ticker, fi, interval="5m")
         change = round(price - prev_close, 2)
-        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else None
         day_high = round(float(fi["dayHigh"]), 2) if fi.get("dayHigh") else None
         day_low = round(float(fi["dayLow"]), 2) if fi.get("dayLow") else None
 
@@ -827,7 +817,7 @@ def _fetch_energy_table_row(symbol: str) -> dict[str, Any]:
 
 async def get_energy_table() -> list[dict[str, Any]]:
     """Fetch energy table snapshots with high/low (60s TTL cache)."""
-    cached = _cache_get("energy_table")
+    cached = cache_get(_MACRO_CACHE_NS, "energy_table")
     if cached is not None:
         return cached
 
@@ -837,7 +827,7 @@ async def get_energy_table() -> list[dict[str, Any]]:
         for sym in _ENERGY_TABLE_TICKERS
     ]
     results = list(await asyncio.gather(*tasks))
-    _cache_set("energy_table", results)
+    cache_set(_MACRO_CACHE_NS, "energy_table", results, ttl=_MACRO_CACHE_TTL)
     return results
 
 
@@ -870,7 +860,7 @@ def _fetch_single_logistics(symbol: str) -> dict[str, Any]:
         price = float(fi["lastPrice"])
         prev_close = float(fi["previousClose"])
         change = round(price - prev_close, 2)
-        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else None
 
         result = {
             "symbol": symbol,
@@ -904,7 +894,7 @@ def _fetch_single_logistics(symbol: str) -> dict[str, Any]:
 
 async def get_logistics_data() -> list[dict[str, Any]]:
     """Fetch logistics snapshots in parallel (60s TTL cache)."""
-    cached = _cache_get("logistics")
+    cached = cache_get(_MACRO_CACHE_NS, "logistics")
     if cached is not None:
         return cached
 
@@ -914,7 +904,7 @@ async def get_logistics_data() -> list[dict[str, Any]]:
         for sym in LOGISTICS_TICKERS
     ]
     results = list(await asyncio.gather(*tasks))
-    _cache_set("logistics", results)
+    cache_set(_MACRO_CACHE_NS, "logistics", results, ttl=_MACRO_CACHE_TTL)
     return results
 
 
@@ -956,7 +946,7 @@ def _fetch_logistics_intraday(symbol: str) -> Optional[list[tuple[str, float]]]:
 
 async def get_logistics_comparison() -> list[dict[str, Any]]:
     """24h logistics comparison for LineChart (60s TTL cache)."""
-    cached = _cache_get("logistics_comparison")
+    cached = cache_get(_MACRO_CACHE_NS, "logistics_comparison")
     if cached is not None:
         return cached
 
@@ -970,7 +960,7 @@ async def get_logistics_comparison() -> list[dict[str, Any]]:
         raw[sym] = await task
 
     result = _merge_to_flat_rows(raw, _LOGISTICS_KEYS)
-    _cache_set("logistics_comparison", result)
+    cache_set(_MACRO_CACHE_NS, "logistics_comparison", result, ttl=_MACRO_CACHE_TTL)
     return result
 
 
@@ -997,7 +987,7 @@ def _fetch_single_proxy(symbol: str) -> dict[str, Any]:
         price = float(fi["lastPrice"])
         prev_close = float(fi["previousClose"])
         change = round(price - prev_close, 2)
-        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else None
 
         result = {
             "symbol": symbol,
@@ -1033,7 +1023,7 @@ def _fetch_single_proxy(symbol: str) -> dict[str, Any]:
 
 async def get_chokepoints_proxys() -> list[dict[str, Any]]:
     """Fetch chokepoint proxy tickers in parallel (60s TTL cache)."""
-    cached = _cache_get("chokepoints_proxys")
+    cached = cache_get(_MACRO_CACHE_NS, "chokepoints_proxys")
     if cached is not None:
         return cached
 
@@ -1043,7 +1033,7 @@ async def get_chokepoints_proxys() -> list[dict[str, Any]]:
         for sym in _CHOKEPOINT_PROXYS
     ]
     results = list(await asyncio.gather(*tasks))
-    _cache_set("chokepoints_proxys", results)
+    cache_set(_MACRO_CACHE_NS, "chokepoints_proxys", results, ttl=_MACRO_CACHE_TTL)
     return results
 
 
@@ -1066,7 +1056,7 @@ def _fetch_macro_status_ticker(symbol: str) -> dict[str, Any]:
         price = float(fi["lastPrice"])
         prev_close = float(fi["previousClose"])
         change = round(price - prev_close, 2)
-        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else None
 
         result = {
             "symbol": symbol,
@@ -1114,7 +1104,7 @@ def _fetch_crude_stocks() -> dict[str, Any]:
 
         latest_vol = float(hist["Volume"].iloc[-1])
         prev_vol = float(hist["Volume"].iloc[-2]) if len(hist) >= 2 else latest_vol
-        vol_change_pct = round(((latest_vol / prev_vol) - 1) * 100, 2) if prev_vol else 0.0
+        vol_change_pct = round(((latest_vol / prev_vol) - 1) * 100, 2) if prev_vol else None
 
         return {
             "symbol": "US_CRUDE_STOCKS",
@@ -1139,7 +1129,7 @@ def _fetch_crude_stocks() -> dict[str, Any]:
 
 async def get_macro_status() -> dict[str, Any]:
     """Fetch Baltic Dry Index + US crude stocks (60s TTL cache)."""
-    cached = _cache_get("macro_status")
+    cached = cache_get(_MACRO_CACHE_NS, "macro_status")
     if cached is not None:
         return cached
 
@@ -1153,5 +1143,5 @@ async def get_macro_status() -> dict[str, Any]:
         "baltic_dry_index": bdry,
         "us_crude_stocks": crude,
     }
-    _cache_set("macro_status", result)
+    cache_set(_MACRO_CACHE_NS, "macro_status", result, ttl=_MACRO_CACHE_TTL)
     return result
