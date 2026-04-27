@@ -178,6 +178,7 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
     df_raw = await fetch_ohlcv(symbol, limit=100)
     df_feat = build_features(df_raw)
     last_row = df_feat[FEATURE_COLUMNS].iloc[[-1]]  # keep as DataFrame
+    volatility_10d = round(float(df_feat["volatility_10d"].iloc[-1]), 6)
 
     # Use YFinance as the authoritative current price (matches frontend header)
     try:
@@ -241,6 +242,7 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
     return {
         "symbol": symbol,
         "current_price": current_price,
+        "volatility_10d": volatility_10d,
         "predictions": predictions,
         "model_age_seconds": round(model_age, 1),
     }

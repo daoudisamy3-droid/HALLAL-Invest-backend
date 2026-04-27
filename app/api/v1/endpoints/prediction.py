@@ -20,7 +20,7 @@ router = APIRouter()
     "/predict/{symbol}",
     summary="ML Price Prediction",
     description=(
-        "Returns the current price and predicted price for J+1 "
+        "Returns the current price, 10-day volatility, and predicted price for J+1 "
         "using a RandomForest model trained on OHLCV features. "
         "Includes directional score (UP/DOWN). Models are cached for 24h per symbol."
     ),
