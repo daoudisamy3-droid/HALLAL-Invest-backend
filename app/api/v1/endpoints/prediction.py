@@ -3,7 +3,7 @@ Prediction API — ML-powered price forecasting endpoints.
 
 Routes:
     GET /predict/{symbol}  → predicted price for J+1 with directional scoring
-    GET /metrics/{symbol}  → MAE from cross-validation per horizon
+    GET /metrics/{symbol}  → directional accuracy from cross-validation
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,8 +21,8 @@ router = APIRouter()
     summary="ML Price Prediction",
     description=(
         "Returns the current price, 10-day volatility, and predicted price for J+1 "
-        "using a RandomForest model trained on OHLCV features. "
-        "Includes directional score (UP/DOWN). Models are cached for 24h per symbol."
+        "using an XGBoost classifier trained on OHLCV + fundamental features. "
+        "Includes directional score (UP/DOWN) and confidence (0–1). Models are cached for 24h per symbol."
     ),
     dependencies=[Depends(rate_limit_dependency)],
 )
@@ -47,7 +47,7 @@ async def predict(symbol: str) -> dict:
     "/metrics/{symbol}",
     summary="Model Evaluation Metrics",
     description=(
-        "Returns the mean absolute error (MAE) from TimeSeriesSplit "
+        "Returns the directional accuracy from TimeSeriesSplit "
         "cross-validation for the J+1 prediction horizon. "
         "Requires models to have been trained at least once."
     ),
@@ -76,7 +76,7 @@ async def metrics(symbol: str) -> dict:
     return {
         "symbol": symbol,
         "metrics": payload["metrics"],
-        "training_samples": payload["training_samples"],
+        "training_samples": payload["metrics"]["training_samples"],
         "n_splits": payload["n_splits"],
         "feature_columns": payload["feature_columns"],
     }

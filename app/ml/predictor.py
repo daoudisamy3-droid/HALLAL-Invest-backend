@@ -1,9 +1,9 @@
 """
-Prediction Service — Cached model inference with 24h TTL.
+Prediction Service — Cached XGBoost inference with 24h TTL.
 
-Manages an in-memory cache of trained models per symbol.
+Manages an in-memory cache of trained (XGBClassifier + StandardScaler) per symbol.
 On cache miss (or TTL expiry), triggers a full training pipeline.
-Predictions are computed from the latest row of feature data.
+Fundamentals from /ticker/{symbol} are merged into features before inference.
 
 Lazy J-1 verification:
   On each call, the previous day's stored prediction is compared against
@@ -15,12 +15,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.api.v1.endpoints.ticker import get_ticker
 from app.core.cache import cache_get, cache_set
 from app.core.logging import logger
 from app.integration import yfinance_client
 from app.ml.data_loader import fetch_ohlcv
 from app.ml.features import build_features, FEATURE_COLUMNS
-from app.ml.targets import TARGET_COLUMNS
 from app.ml.trainer import train_models
 
 
@@ -35,7 +35,7 @@ _verification_in_progress: set[str] = set()
 
 _PRED_NAMESPACE = "pred"
 _ACCURACY_NAMESPACE = "accuracy"
-_PRED_TTL = 86_400 * 2     # keep stored predictions for 2 days
+_PRED_TTL = 86_400 * 2      # keep stored predictions for 2 days
 _ACCURACY_TTL = 86_400 * 30  # accuracy stats kept 30 days
 
 
@@ -126,16 +126,17 @@ async def _verify_yesterday_prediction(symbol: str) -> None:
 
 async def get_prediction(symbol: str) -> dict[str, Any]:
     """
-    Return price predictions for J+1 with directional scoring.
+    Return J+1 price prediction with directional confidence scoring.
 
     Flow:
         1. Lazy-verify yesterday's prediction (accuracy tracking).
         2. If models for `symbol` are cached and < 24h old → reuse.
            Otherwise → call train_models(symbol) and cache result.
-        3. Fetch latest OHLCV data, build features, take last row.
-        4. Run model on last-row feature vector.
-        5. Persist today's prediction (direction + reference price) for
-           tomorrow's verification.
+        3. Fetch fundamentals from /ticker/{symbol} (silent fallback to None).
+        4. Fetch latest OHLCV data, build features (with fundamentals).
+        5. Scale last row with fitted StandardScaler, run XGBClassifier.
+        6. Derive predicted price from confidence-adjusted median return.
+        7. Persist today's prediction for tomorrow's verification.
 
     Args:
         symbol: Ticker symbol (e.g. "AAPL").
@@ -144,8 +145,14 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
         {
             "symbol": str,
             "current_price": float,
+            "volatility_10d": float,
             "predictions": {
-                "1d": {"price": float, "pct": float, "direction": "UP"|"DOWN"},
+                "1d": {
+                    "price": float,
+                    "pct": float,
+                    "direction": "UP"|"DOWN",
+                    "confidence": float,  # raw proba(UP), 0–1
+                },
             },
             "model_age_seconds": float,
         }
@@ -171,13 +178,20 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
 
     cache_entry = _model_cache[symbol]
     payload = cache_entry["payload"]
-    models = payload["models"]
+    model = payload["model"]    # XGBClassifier
+    scaler = payload["scaler"]  # StandardScaler
     model_age = time.time() - cache_entry["trained_at"]
 
-    # ── Step 3: Get latest feature row ────────────────────────────
+    # ── Step 3: Fetch fundamentals (silent fallback) ──────────────
+    try:
+        ticker_data = await get_ticker(symbol)
+        fundamentals = ticker_data.model_dump()
+    except Exception:
+        fundamentals = None
+
+    # ── Step 4: Build features with fundamentals ──────────────────
     df_raw = await fetch_ohlcv(symbol, limit=100)
-    df_feat = build_features(df_raw)
-    last_row = df_feat[FEATURE_COLUMNS].iloc[[-1]]  # keep as DataFrame
+    df_feat = build_features(df_raw, fundamentals=fundamentals)
     volatility_10d = round(float(df_feat["volatility_10d"].iloc[-1]), 6)
 
     # Use YFinance as the authoritative current price (matches frontend header)
@@ -191,36 +205,45 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
         )
         current_price = float(df_feat["close"].iloc[-1])
 
-    # ── Step 4: Predict for each horizon ─────────────────────────
-    predictions: dict[str, dict[str, Any]] = {}
-    horizon_labels = {col: col.replace("target_", "") for col in TARGET_COLUMNS}
+    # ── Step 5: Scale and infer ───────────────────────────────────
+    last_row = df_feat[FEATURE_COLUMNS].iloc[[-1]]
+    last_row_scaled = scaler.transform(last_row)
 
-    for target_col in TARGET_COLUMNS:
-        model = models[target_col]
-        pct_change = float(model.predict(last_row.values)[0])
-        predicted_price = round(current_price * (1 + pct_change), 2)
-        direction = "UP" if pct_change >= 0 else "DOWN"
+    # Probability of UP (class 1)
+    proba = float(model.predict_proba(last_row_scaled)[0][1])
+    direction = "UP" if proba >= 0.5 else "DOWN"
 
-        label = horizon_labels[target_col]
-        predictions[label] = {
+    # ── Step 6: Confidence-adjusted price target ──────────────────
+    # Apply historical median return weighted by model confidence
+    median_return = float(df_feat["return_1d"].median())
+    signed_return = median_return if direction == "UP" else -abs(median_return)
+    confidence_adjusted = signed_return * proba
+    predicted_price = round(current_price * (1 + confidence_adjusted), 2)
+    pct = round(confidence_adjusted * 100, 3)
+
+    predictions = {
+        "1d": {
             "price": predicted_price,
-            "pct": round(pct_change * 100, 4),
+            "pct": pct,
             "direction": direction,
+            "confidence": round(proba, 4),
         }
+    }
 
-    # ── Step 5: Persist today's prediction for future verification ─
+    # ── Step 7: Persist today's prediction for future verification ─
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    pred_1d = predictions.get("1d", {})
+    pred_1d = predictions["1d"]
 
     if cache_get(_PRED_NAMESPACE, f"{symbol}:{today}") is None:
         cache_set(
             _PRED_NAMESPACE,
             f"{symbol}:{today}",
             {
-                "direction": pred_1d.get("direction"),
+                "direction": pred_1d["direction"],
                 "price_at_prediction": current_price,
-                "predicted_price": pred_1d.get("price"),
-                "pct": pred_1d.get("pct"),
+                "predicted_price": pred_1d["price"],
+                "pct": pred_1d["pct"],
+                "confidence": pred_1d["confidence"],
                 "verified": False,
                 "actual_close": None,
                 "correct": None,
@@ -228,15 +251,13 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
             ttl=_PRED_TTL,
         )
         logger.info(
-            "Stored today's prediction for %s: direction=%s price_ref=%.2f",
-            symbol, pred_1d.get("direction"), current_price,
+            "Stored today's prediction for %s: direction=%s confidence=%.3f price_ref=%.2f",
+            symbol, pred_1d["direction"], proba, current_price,
         )
 
     logger.info(
-        "Prediction for %s: price=%.2f J+1=%.2f (%s)",
-        symbol, current_price,
-        pred_1d.get("price", 0.0),
-        pred_1d.get("direction", "?"),
+        "Prediction for %s: price=%.2f J+1=%.2f direction=%s confidence=%.3f",
+        symbol, current_price, pred_1d["price"], pred_1d["direction"], proba,
     )
 
     return {
