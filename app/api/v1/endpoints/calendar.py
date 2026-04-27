@@ -88,9 +88,12 @@ async def calendar(symbol: str) -> dict:
 
     # ── Dividend ──────────────────────────────────────────────────
     div_yield_raw = data.get("div_yield")
-    div_yield_pct: float | None = (
-        round(div_yield_raw * 100, 4) if div_yield_raw is not None else None
-    )
+    if div_yield_raw is not None:
+        div_yield_pct = round(float(div_yield_raw) * 100, 2)
+        if div_yield_pct > 50:  # source already returned a percentage, not a decimal
+            div_yield_pct = round(div_yield_pct / 100, 2)
+    else:
+        div_yield_pct = None
 
     # ── Compose response ──────────────────────────────────────────
     result = {
