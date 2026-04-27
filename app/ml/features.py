@@ -1,18 +1,26 @@
 """
-Feature Engineering — Technical indicators from OHLCV data.
+Feature Engineering — Technical indicators + optional fundamental data.
 
 Input:  DataFrame with columns [timestamp, open, high, low, close, volume]
+        + optional `fundamentals` dict from /api/v1/ticker/{symbol}
 Output: DataFrame with original columns + engineered features, NaN rows dropped.
 
-Features:
-  - close        (raw)
-  - volume       (raw)
-  - return_1d    daily percentage return
-  - volatility_10d  rolling 10-day std of return_1d
-  - ma_5         5-day simple moving average of close
-  - ma_10        10-day simple moving average of close
-  - ma_20        20-day simple moving average of close
+Technical features (always computed):
+  - close, volume          (raw)
+  - return_1d              daily percentage return
+  - volatility_10d         rolling 10-day std of return_1d
+  - ma_5, ma_10, ma_20     simple moving averages of close
+
+Fundamental features (require `fundamentals` dict; default 0.0 otherwise):
+  - rsi_14                 14-day Relative Strength Index
+  - trailing_pe            trailing price-to-earnings ratio
+  - profit_margins         net profit margin
+  - return_on_equity       return on equity
+  - price_vs_52w_high      close / 52-week high  (range position)
+  - price_vs_200ma         close / 200-day moving average
 """
+
+from typing import Optional
 
 import pandas as pd
 
@@ -28,18 +36,40 @@ FEATURE_COLUMNS = [
     "ma_5",
     "ma_10",
     "ma_20",
+    "rsi_14",
+    "trailing_pe",
+    "profit_margins",
+    "return_on_equity",
+    "price_vs_52w_high",
+    "price_vs_200ma",
+]
+
+_FUNDAMENTAL_COLS = [
+    "rsi_14",
+    "trailing_pe",
+    "profit_margins",
+    "return_on_equity",
+    "price_vs_52w_high",
+    "price_vs_200ma",
 ]
 
 
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
+def build_features(
+    df: pd.DataFrame,
+    fundamentals: Optional[dict] = None,
+) -> pd.DataFrame:
     """
-    Add technical indicator columns to the OHLCV DataFrame.
+    Add technical and (optionally) fundamental feature columns to the DataFrame.
 
     Args:
-        df: DataFrame with at least [close, volume] columns.
+        df:           DataFrame with at least [close, volume] columns.
+        fundamentals: Dict from /api/v1/ticker/{symbol} response.
+                      Each key maps to {"value": float|None, ...}.
+                      When None, fundamental columns are filled with 0.0
+                      so the feature matrix shape stays consistent.
 
     Returns:
-        New DataFrame with feature columns added and NaN rows dropped.
+        New DataFrame with all FEATURE_COLUMNS added and NaN rows dropped.
         The original DataFrame is not mutated.
 
     Raises:
@@ -69,14 +99,44 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out["ma_10"] = out["close"].rolling(window=10).mean()
     out["ma_20"] = out["close"].rolling(window=20).mean()
 
-    # ── Drop rows with NaN (first 20 rows won't have ma_20) ──────
+    # ── Fundamental features ──────────────────────────────────────
+    if fundamentals is not None:
+        # price_vs_52w_high : position in the annual range (close / 52w high)
+        high_52w = fundamentals.get("fifty_two_week_high", {}).get("value")
+        if high_52w and high_52w > 0:
+            out["price_vs_52w_high"] = out["close"] / high_52w
+        else:
+            out["price_vs_52w_high"] = 1.0
+
+        # price_vs_200ma : distance from long-term moving average
+        ma_200 = fundamentals.get("two_hundred_day_average", {}).get("value")
+        if ma_200 and ma_200 > 0:
+            out["price_vs_200ma"] = out["close"] / ma_200
+        else:
+            out["price_vs_200ma"] = 1.0
+
+        # Scalar fundamentals broadcast across all rows
+        for col, key in [
+            ("rsi_14",           "rsi_14"),
+            ("trailing_pe",      "trailing_pe"),
+            ("profit_margins",   "profit_margins"),
+            ("return_on_equity", "return_on_equity"),
+        ]:
+            val = fundamentals.get(key, {}).get("value")
+            out[col] = float(val) if val is not None else 0.0
+    else:
+        for col in _FUNDAMENTAL_COLS:
+            out[col] = 0.0
+
+    # ── Drop rows with NaN across all feature columns ─────────────
     rows_before = len(out)
     out = out.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
     rows_after = len(out)
 
+    fundamental_mode = "with fundamentals" if fundamentals is not None else "fundamentals=None (zeros)"
     logger.info(
-        "Features built: %d → %d rows (%d dropped due to NaN from rolling windows)",
-        rows_before, rows_after, rows_before - rows_after,
+        "Features built (%s): %d → %d rows (%d dropped due to NaN)",
+        fundamental_mode, rows_before, rows_after, rows_before - rows_after,
     )
 
     return out
