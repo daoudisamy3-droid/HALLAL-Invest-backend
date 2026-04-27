@@ -132,10 +132,7 @@ async def train_models(symbol: str) -> dict[str, Any]:
         "feature_columns": FEATURE_COLUMNS,
     }
 
-    logger.info(
-        "=== TRAINING END for %s: samples=%d, MAE_1d=%.6f, MAE_3d=%.6f, MAE_5d=%.6f ===",
-        symbol, len(df_full),
-        metrics["target_1d"], metrics["target_3d"], metrics["target_5d"],
-    )
+    metrics_str = " | ".join(f"{k}={v:.6f}" for k, v in metrics.items())
+    logger.info("=== TRAINING END for %s: samples=%d, %s ===", symbol, len(df_full), metrics_str)
 
     return result

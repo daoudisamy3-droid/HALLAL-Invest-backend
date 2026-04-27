@@ -2,7 +2,7 @@
 Prediction API — ML-powered price forecasting endpoints.
 
 Routes:
-    GET /predict/{symbol}  → predicted prices for J+1, J+3, J+5
+    GET /predict/{symbol}  → predicted price for J+1 with directional scoring
     GET /metrics/{symbol}  → MAE from cross-validation per horizon
 """
 
@@ -20,9 +20,9 @@ router = APIRouter()
     "/predict/{symbol}",
     summary="ML Price Prediction",
     description=(
-        "Returns the current price and predicted prices for J+1, J+3, J+5 "
+        "Returns the current price and predicted price for J+1 "
         "using a RandomForest model trained on OHLCV features. "
-        "Models are cached for 24h per symbol."
+        "Includes directional score (UP/DOWN). Models are cached for 24h per symbol."
     ),
     dependencies=[Depends(rate_limit_dependency)],
 )
@@ -48,7 +48,7 @@ async def predict(symbol: str) -> dict:
     summary="Model Evaluation Metrics",
     description=(
         "Returns the mean absolute error (MAE) from TimeSeriesSplit "
-        "cross-validation for each prediction horizon (1d, 3d, 5d). "
+        "cross-validation for the J+1 prediction horizon. "
         "Requires models to have been trained at least once."
     ),
     dependencies=[Depends(rate_limit_dependency)],
