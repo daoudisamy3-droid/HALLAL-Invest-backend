@@ -1,33 +1,41 @@
 """
-Training Pipeline — 3 independent RandomForestRegressor models.
+Training Pipeline — XGBClassifier with directional binary classification.
 
-Pipeline:  fetch_ohlcv → build_features → build_targets → train & evaluate.
+Pipeline:  fetch_ohlcv → build_features → build_targets → binarize → scale → train.
+
+Target: 1 = price goes UP tomorrow (target_1d > 0), 0 = DOWN or flat.
 
 Evaluation uses TimeSeriesSplit (n_splits=5) — NO shuffle — to respect
 temporal ordering and prevent future data from leaking into training folds.
+Metric: directional accuracy (% of correctly predicted UP/DOWN days).
 
-Returns trained models + MAE metrics per horizon.
+Returns fitted XGBClassifier + StandardScaler + accuracy metrics.
 """
 
 import asyncio
 from typing import Any
 
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import accuracy_score
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import StandardScaler
+from xgboost import XGBClassifier
 
 from app.core.logging import logger
 from app.ml.data_loader import fetch_ohlcv
 from app.ml.features import build_features, FEATURE_COLUMNS
-from app.ml.targets import build_targets, HORIZONS, TARGET_COLUMNS
+from app.ml.targets import build_targets
 
 
 # ── Model hyperparameters ────────────────────────────────────────
 
-_RF_PARAMS = {
+_XGB_PARAMS = {
     "n_estimators": 300,
-    "max_depth": 10,
+    "max_depth": 4,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "eval_metric": "logloss",
     "random_state": 42,
     "n_jobs": -1,
 }
@@ -41,13 +49,13 @@ async def train_models(symbol: str) -> dict[str, Any]:
 
     Steps:
         1. Fetch ~1000 daily bars from Alpaca
-        2. Compute technical features (close, volume, return, vol, MAs)
-        3. Build forward-looking targets (1d, 3d, 5d)
-        4. For each horizon:
-           a. TimeSeriesSplit cross-validation (5 folds, no shuffle)
-           b. Compute MAE on each fold
-           c. Final fit on all data for production predictions
-        5. Return models + metrics
+        2. Compute technical features (13 columns)
+        3. Build forward-looking target (1d return)
+        4. Binarize: 1 = UP (return > 0), 0 = DOWN / flat
+        5. StandardScaler fit on full X
+        6. TimeSeriesSplit cross-validation (5 folds) → directional accuracy
+        7. Final XGBClassifier fit on all scaled data
+        8. Return model + scaler + metrics
 
     Args:
         symbol: Ticker symbol (e.g. "AAPL").
@@ -55,9 +63,13 @@ async def train_models(symbol: str) -> dict[str, Any]:
     Returns:
         {
             "symbol": str,
-            "models": {"target_1d": fitted_model, "target_3d": ..., "target_5d": ...},
-            "metrics": {"target_1d": mae_float, "target_3d": ..., "target_5d": ...},
-            "training_samples": int,
+            "model": XGBClassifier (fitted),
+            "scaler": StandardScaler (fitted),
+            "metrics": {
+                "directional_accuracy_cv": float,
+                "directional_accuracy_std": float,
+                "training_samples": int,
+            },
             "n_splits": int,
             "feature_columns": list[str],
         }
@@ -79,60 +91,66 @@ async def train_models(symbol: str) -> dict[str, Any]:
     df_full = build_targets(df_feat)
     logger.info("After targets: %d rows (ready for training)", len(df_full))
 
-    # ── Step 4: Train one model per horizon ───────────────────────
+    # ── Step 4: Binarize continuous return → UP / DOWN ────────────
+    df_full["target_binary"] = (df_full["target_1d"] > 0).astype(int)
+    TARGET_COL = "target_binary"
+
+    # ── Step 5: Prepare feature matrix and scale ──────────────────
     X = df_full[FEATURE_COLUMNS].values
+    y = df_full[TARGET_COL].values
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # ── Step 6: TimeSeriesSplit cross-validation ──────────────────
     tscv = TimeSeriesSplit(n_splits=_N_SPLITS)
+    fold_accuracies: list[float] = []
 
-    models: dict[str, RandomForestRegressor] = {}
-    metrics: dict[str, float] = {}
+    for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X_scaled)):
+        X_train, X_val = X_scaled[train_idx], X_scaled[val_idx]
+        y_train, y_val = y[train_idx], y[val_idx]
 
-    for target_col in TARGET_COLUMNS:
-        y = df_full[target_col].values
+        fold_model = XGBClassifier(**_XGB_PARAMS)
+        fold_model.fit(X_train, y_train)
 
-        # Cross-validation — compute MAE across folds
-        fold_maes: list[float] = []
+        acc = accuracy_score(y_val, fold_model.predict(X_val))
+        fold_accuracies.append(acc)
 
-        for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X)):
-            X_train, X_val = X[train_idx], X[val_idx]
-            y_train, y_val = y[train_idx], y[val_idx]
-
-            fold_model = RandomForestRegressor(**_RF_PARAMS)
-            fold_model.fit(X_train, y_train)
-
-            y_pred = fold_model.predict(X_val)
-            fold_mae = mean_absolute_error(y_val, y_pred)
-            fold_maes.append(fold_mae)
-
-            logger.debug(
-                "%s fold %d/%d: train=%d, val=%d, MAE=%.6f",
-                target_col, fold_idx + 1, _N_SPLITS,
-                len(train_idx), len(val_idx), fold_mae,
-            )
-
-        avg_mae = float(np.mean(fold_maes))
-        metrics[target_col] = round(avg_mae, 6)
-
-        logger.info(
-            "%s CV MAE: %.6f (folds: %s)",
-            target_col, avg_mae,
-            [round(m, 6) for m in fold_maes],
+        logger.debug(
+            "fold %d/%d: train=%d val=%d accuracy=%.4f",
+            fold_idx + 1, _N_SPLITS,
+            len(train_idx), len(val_idx), acc,
         )
 
-        # Final model — fit on ALL data for production use
-        final_model = RandomForestRegressor(**_RF_PARAMS)
-        final_model.fit(X, y)
-        models[target_col] = final_model
+    cv_mean = float(np.mean(fold_accuracies))
+    cv_std = float(np.std(fold_accuracies))
+
+    logger.info(
+        "Directional Accuracy CV: %.3f ± %.3f (folds: %s)",
+        cv_mean, cv_std,
+        [round(a, 4) for a in fold_accuracies],
+    )
+
+    # ── Step 7: Final fit on all data ─────────────────────────────
+    model = XGBClassifier(**_XGB_PARAMS)
+    model.fit(X_scaled, y)
 
     result = {
         "symbol": symbol,
-        "models": models,
-        "metrics": metrics,
-        "training_samples": len(df_full),
+        "model": model,
+        "scaler": scaler,
+        "metrics": {
+            "directional_accuracy_cv": round(cv_mean, 4),
+            "directional_accuracy_std": round(cv_std, 4),
+            "training_samples": len(df_full),
+        },
         "n_splits": _N_SPLITS,
         "feature_columns": FEATURE_COLUMNS,
     }
 
-    metrics_str = " | ".join(f"{k}={v:.6f}" for k, v in metrics.items())
-    logger.info("=== TRAINING END for %s: samples=%d, %s ===", symbol, len(df_full), metrics_str)
+    logger.info(
+        "=== TRAINING END for %s: samples=%d acc=%.3f±%.3f ===",
+        symbol, len(df_full), cv_mean, cv_std,
+    )
 
     return result
