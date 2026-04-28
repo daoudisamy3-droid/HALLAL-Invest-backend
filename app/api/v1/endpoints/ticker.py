@@ -10,6 +10,7 @@ from app.core.cache import cache_get, cache_set
 from app.core.logging import logger
 from app.core.security import rate_limit_dependency
 from app.integration import yfinance_client
+from app.ml.data_loader import fetch_ohlcv
 from app.models.schemas import (
     DataGeneral, Metric, PriceResponse, AAOIFIAudit,
     AnalystSentiment, RecommendationBreakdown,
@@ -358,3 +359,59 @@ async def get_ticker(symbol: str) -> DataGeneral:
         rsi_14=_metric(rsi, _fmt_num(rsi), "calc/yfinance"),
         max_drawdown_5y=_metric(max_dd, f"{max_dd}%" if max_dd is not None else "N/A", "calc/yfinance"),
     )
+
+
+_OHLCV_CACHE_NS = "ohlcv"
+_OHLCV_CACHE_TTL = 3600  # 1 hour
+
+
+@router.get(
+    "/ticker/{symbol}/ohlcv",
+    summary="OHLCV Bars",
+    description=(
+        "Returns historical OHLCV bars for a symbol. "
+        "`limit` controls the number of bars (default 90), "
+        "`timeframe` the bar size (default '1Day')."
+    ),
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def get_ticker_ohlcv(
+    symbol: str,
+    limit: int = 90,
+    timeframe: str = "1Day",
+) -> dict:
+    symbol = symbol.upper().strip()
+    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+
+    cache_key = f"{symbol}:{limit}:{timeframe}"
+    cached = cache_get(_OHLCV_CACHE_NS, cache_key)
+    if cached is not None:
+        logger.info("ohlcv/%s: cache hit (limit=%d timeframe=%s)", symbol, limit, timeframe)
+        return cached
+
+    try:
+        df = await fetch_ohlcv(symbol, limit=limit, timeframe=timeframe)
+    except Exception as exc:
+        logger.error("ohlcv/%s: fetch failed: %s", symbol, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not fetch OHLCV data for '{symbol}': {exc}",
+        )
+
+    bars = [
+        {
+            "date": row["timestamp"].strftime("%Y-%m-%d"),
+            "open": round(float(row["open"]), 4),
+            "high": round(float(row["high"]), 4),
+            "low": round(float(row["low"]), 4),
+            "close": round(float(row["close"]), 4),
+            "volume": int(row["volume"]),
+        }
+        for row in df.to_dict(orient="records")
+    ]
+
+    result = {"symbol": symbol, "bars": bars}
+    cache_set(_OHLCV_CACHE_NS, cache_key, result, ttl=_OHLCV_CACHE_TTL)
+    logger.info("ohlcv/%s: %d bars returned (limit=%d timeframe=%s)", symbol, len(bars), limit, timeframe)
+    return result
