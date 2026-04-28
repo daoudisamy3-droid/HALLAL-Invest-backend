@@ -250,44 +250,43 @@ def _fetch_calendar(symbol: str) -> dict[str, Any]:
     earnings_dates_list = [d for d in earnings_dates_list if d]
 
     # ── Earnings history (4 last quarters) ───────────────────────
+    # ticker.earnings_history contains past actuals (epsEstimate, epsActual,
+    # epsDifference, surprisePercent) — unlike earnings_dates which is future.
     history: list[dict] = []
     try:
-        df = ticker.earnings_dates
-        if df is not None and not df.empty:
-            today_str = date.today().isoformat()
-            # Keep rows with a past date and a non-null Reported EPS
-            past_rows = []
-            for idx, row in df.iterrows():
-                try:
-                    row_date = str(idx)[:10]
-                except Exception:
-                    continue
-                if row_date > today_str:
-                    continue
-                reported = row.get("Reported EPS")
-                if reported is None or (hasattr(reported, "__float__") and str(reported) == "nan"):
-                    continue
-                estimate = row.get("EPS Estimate")
-                surprise = row.get("Surprise(%)")
-                try:
-                    estimate = float(estimate) if estimate is not None and str(estimate) != "nan" else None
-                    reported = float(reported)
-                    surprise = float(surprise) if surprise is not None and str(surprise) != "nan" else None
-                except (TypeError, ValueError):
-                    continue
+        hist = ticker.earnings_history
+        if hist is not None and not hist.empty:
+            past = hist[hist.index < pd.Timestamp.now()]
+            past = past.tail(4).sort_index(ascending=False)
+            for idx, row in past.iterrows():
+                eps_est = row.get("epsEstimate")
+                eps_act = row.get("epsActual")
+                surprise = row.get("surprisePercent")
+
+                def _safe_float(v):
+                    try:
+                        f = float(v)
+                        return None if pd.isna(f) else f
+                    except (TypeError, ValueError):
+                        return None
+
+                eps_est_f = _safe_float(eps_est)
+                eps_act_f = _safe_float(eps_act)
+                surprise_f = _safe_float(surprise)
+
                 beat: bool | None = None
-                if estimate is not None:
-                    beat = reported > estimate
-                past_rows.append({
-                    "date": row_date,
-                    "eps_estimate": round(estimate, 4) if estimate is not None else None,
-                    "eps_reported": round(reported, 4),
-                    "surprise_pct": round(surprise, 2) if surprise is not None else None,
+                if eps_est_f is not None and eps_act_f is not None:
+                    beat = eps_act_f > eps_est_f
+
+                history.append({
+                    "date": idx.strftime("%Y-%m-%d"),
+                    "eps_estimate": round(eps_est_f, 4) if eps_est_f is not None else None,
+                    "eps_reported": round(eps_act_f, 4) if eps_act_f is not None else None,
+                    "surprise_pct": round(surprise_f, 2) if surprise_f is not None else None,
                     "beat": beat,
                 })
-            history = past_rows[-4:]  # keep last 4
     except Exception as exc:
-        logger.debug("yfinance earnings_dates failed for %s: %s", symbol, exc)
+        logger.debug("yfinance earnings_history failed for %s: %s", symbol, exc)
 
     # ── Dividend info ─────────────────────────────────────────────
     def _unix_to_iso(ts) -> str | None:
