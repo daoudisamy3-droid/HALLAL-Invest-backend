@@ -289,6 +289,23 @@ async def corporate_rels(symbol: str) -> dict:
     if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
+    # ── Network connectivity probe (temporary diagnostic) ─────────
+    try:
+        async with httpx.AsyncClient(timeout=8) as _probe:
+            r1 = await _probe.get(
+                "https://api.opencorporates.com/v0.4/companies/search?q=Apple&jurisdiction_code=us",
+                headers={"User-Agent": "FinTerminal/1.0"},
+            )
+            logger.info("OpenCorporates: %s", r1.status_code)
+
+            r2 = await _probe.get(
+                "https://api.gleif.org/api/v1/lei-records?filter[entity.legalName]=Apple",
+                headers={"Accept": "application/vnd.api+json"},
+            )
+            logger.info("GLEIF direct: %s", r2.status_code)
+    except Exception as e:
+        logger.error("Network test failed: %s", e)
+
     cached = cache_get(_RELS_CACHE_NS, symbol)
     if cached is not None:
         logger.info("rels/%s: cache hit", symbol)
