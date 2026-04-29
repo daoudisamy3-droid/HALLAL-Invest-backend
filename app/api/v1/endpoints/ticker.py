@@ -415,3 +415,108 @@ async def get_ticker_ohlcv(
     cache_set(_OHLCV_CACHE_NS, cache_key, result, ttl=_OHLCV_CACHE_TTL)
     logger.info("ohlcv/%s: %d bars returned (limit=%d timeframe=%s)", symbol, len(bars), limit, timeframe)
     return result
+
+
+# ── Management ────────────────────────────────────────────────────
+
+_MGMT_CACHE_NS = "management"
+_MGMT_CACHE_TTL = 86400  # 24 hours
+
+_PARTICLES = {"de", "van", "bin", "el", "al", "du", "von", "der"}
+
+
+def _normalize_rank(title: str) -> int:
+    t = title.lower()
+    if "chief executive" in t or "ceo" in t or "president and c" in t:
+        return 1
+    if "chief financial" in t or "cfo" in t:
+        return 2
+    if "chief operating" in t or "coo" in t:
+        return 3
+    if "chief technology" in t or "cto" in t:
+        return 4
+    if "chief product" in t or "cpo" in t:
+        return 5
+    if "chief marketing" in t or "cmo" in t:
+        return 6
+    if "general counsel" in t or "chief legal" in t:
+        return 7
+    if "chief human" in t or "chro" in t:
+        return 8
+    if "secretary" in t:
+        return 9
+    return 10
+
+
+def _make_initials(name: str) -> str:
+    words = [w for w in name.split() if w.lower() not in _PARTICLES]
+    if len(words) >= 2:
+        return (words[0][0] + words[-1][0]).upper()
+    if len(words) == 1:
+        return words[0][:2].upper()
+    return ""
+
+
+@router.get(
+    "/ticker/{symbol}/management",
+    summary="Company Management Team",
+    description=(
+        "Returns the company's executive officers sorted by seniority, "
+        "with name, title, rank, age, compensation, and initials."
+    ),
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def get_ticker_management(symbol: str) -> dict:
+    symbol = symbol.upper().strip()
+    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+
+    cached = cache_get(_MGMT_CACHE_NS, symbol)
+    if cached is not None:
+        logger.info("management/%s: cache hit", symbol)
+        return cached
+
+    try:
+        info = await yfinance_client.get_ticker_info(symbol)
+    except Exception as exc:
+        logger.error("management/%s: fetch failed: %s", symbol, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not fetch management data for '{symbol}': {exc}",
+        )
+
+    officers_raw: list[dict] = info.get("companyOfficers") or []
+
+    if not officers_raw:
+        result = {"symbol": symbol, "officers": [], "available": False}
+        cache_set(_MGMT_CACHE_NS, symbol, result, ttl=_MGMT_CACHE_TTL)
+        return result
+
+    officers: list[dict] = []
+    for o in officers_raw:
+        name = o.get("name") or ""
+        title = o.get("title") or ""
+        officers.append({
+            "name": name,
+            "title": title,
+            "rank": _normalize_rank(title),
+            "age": o.get("age"),
+            "total_pay": o.get("totalPay"),
+            "year_born": o.get("yearBorn"),
+            "initials": _make_initials(name),
+        })
+
+    officers.sort(key=lambda x: (x["rank"], x["name"]))
+
+    result = {
+        "symbol": symbol,
+        "company_name": info.get("longName") or symbol,
+        "sector": info.get("sector"),
+        "employees": info.get("fullTimeEmployees"),
+        "available": True,
+        "officers": officers,
+    }
+
+    cache_set(_MGMT_CACHE_NS, symbol, result, ttl=_MGMT_CACHE_TTL)
+    logger.info("management/%s: %d officers returned", symbol, len(officers))
+    return result
