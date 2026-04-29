@@ -91,23 +91,33 @@ async def _gleif_get(
         return None
 
 
+def _similarity(a: str, b: str) -> float:
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+
+_SIMILARITY_THRESHOLD = 0.6
+
+
 async def _search_lei(
     client: httpx.AsyncClient,
     legal_name: str,
     iso2: str | None,
 ) -> dict | None:
     """
-    Resolve a company name to its LEI using fuzzycompletions.
+    Resolve a company name to its LEI using fuzzycompletions + similarity scoring.
 
     Strategy:
-      1. Fuzzycompletions → up to 5 LEI candidates.
-      2. For each candidate, fetch the full record to check country.
-      3. Return first record whose country matches iso2 (or first if no match).
+      1. Fuzzycompletions → up to 10 LEI candidates.
+      2. Fetch all full records in parallel for name + country.
+      3. Score each record with SequenceMatcher against legal_name.
+      4. Filter by country match (when available) and score >= 0.6.
+      5. Return the highest-scoring candidate; None if none clears threshold.
     """
     fuzz = await _gleif_get(
         client,
         f"{_GLEIF_BASE}/fuzzycompletions",
-        params={"field": "entity.legalName", "q": legal_name, "page[size]": "5"},
+        params={"field": "entity.legalName", "q": legal_name, "page[size]": "10"},
     )
     if not fuzz or not fuzz.get("data"):
         return None
@@ -122,14 +132,14 @@ async def _search_lei(
     if not candidates:
         return None
 
-    # Fetch full records in parallel for country check
+    # Fetch full records in parallel
     tasks = [
         _gleif_get(client, f"{_GLEIF_BASE}/lei-records/{lei}")
         for lei in candidates
     ]
     records_raw = await asyncio.gather(*tasks)
 
-    best: dict | None = None
+    scored: list[tuple[float, dict]] = []
     for raw in records_raw:
         if not raw or not raw.get("data"):
             continue
@@ -137,24 +147,34 @@ async def _search_lei(
         attrs = rec.get("attributes", {})
         entity = attrs.get("entity", {})
         rec_country = (entity.get("legalAddress") or {}).get("country")
-        rec_lei = rec.get("id")
         rec_name = _lei_name(entity.get("legalName"))
-        rec_status = entity.get("status", "ACTIVE")
 
-        entry = {
-            "lei": rec_lei,
+        # Country filter: skip records from wrong country when iso2 is known
+        if iso2 and rec_country and rec_country.upper() != iso2.upper():
+            continue
+
+        score = _similarity(legal_name, rec_name)
+        if score < _SIMILARITY_THRESHOLD:
+            continue
+
+        scored.append((score, {
+            "lei": rec.get("id"),
             "name": rec_name,
             "country": rec_country,
-            "status": rec_status,
-        }
+            "status": entity.get("status", "ACTIVE"),
+        }))
 
-        if iso2 and rec_country and rec_country.upper() == iso2.upper():
-            return entry  # exact country match → stop immediately
+    if not scored:
+        return None
 
-        if best is None:
-            best = entry  # keep first as fallback
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_entry = scored[0]
 
-    return best
+    logger.info(
+        "GLEIF match: %s → %s (score=%.2f, lei=%s)",
+        legal_name, best_entry["name"], best_score, best_entry["lei"],
+    )
+    return best_entry
 
 
 async def _get_ultimate_parent(
