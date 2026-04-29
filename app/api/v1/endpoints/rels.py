@@ -208,12 +208,32 @@ async def _get_children(
     lei: str,
     page_size: int = 20,
 ) -> tuple[list[dict], int]:
-    """Returns (children_list, total_count) for a given parent LEI."""
+    """
+    Returns (children_list, total_count) using the GLEIF /direct-children path.
+
+    Falls back to the filter[relationships.directParent.data.id] query if the
+    path endpoint returns an empty dataset (API version variance guard).
+    """
+    # Primary: official GLEIF relationship endpoint
     raw = await _gleif_get(
         client,
-        f"{_GLEIF_BASE}/lei-records",
-        params={"filter[ultimateParent]": lei, "page[size]": str(page_size)},
+        f"{_GLEIF_BASE}/lei-records/{lei}/direct-children",
+        params={"page[size]": str(page_size)},
     )
+    logger.info("GLEIF children raw (direct-children): %s", raw)
+
+    # Fallback: filter query (some GLEIF API versions expose this)
+    if not raw or not raw.get("data"):
+        raw = await _gleif_get(
+            client,
+            f"{_GLEIF_BASE}/lei-records",
+            params={
+                "filter[relationships.directParent.data.id]": lei,
+                "page[size]": str(page_size),
+            },
+        )
+        logger.info("GLEIF children raw (filter fallback): %s", raw)
+
     if not raw:
         return [], 0
 
