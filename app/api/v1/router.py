@@ -8,6 +8,7 @@ from app.api.v1.endpoints.analyze import router as analyze_router
 from app.api.v1.endpoints.risk import router as risk_router
 from app.api.v1.endpoints.calendar import router as calendar_router
 from app.api.v1.endpoints.rels import router as rels_router
+from app.api.v1.endpoints.score import router as score_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(ticker_router, tags=["Ticker Analysis"])
@@ -18,3 +19,4 @@ api_router.include_router(analyze_router, tags=["Analyze Engine"])
 api_router.include_router(risk_router, tags=["Risk Intelligence"])
 api_router.include_router(calendar_router, tags=["Calendar"])
 api_router.include_router(rels_router, tags=["RELS"])
+api_router.include_router(score_router, tags=["Score Engine"])
