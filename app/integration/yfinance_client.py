@@ -83,10 +83,28 @@ def _fetch_income_stmt(symbol: str) -> Optional[dict]:
     return result
 
 
+def _fetch_cashflow(symbol: str) -> Optional[dict]:
+    """Fetch latest annual cashflow statement from yfinance as a flat dict."""
+    ticker = yf.Ticker(symbol)
+    cf = ticker.cashflow
+    if cf is None or cf.empty:
+        return None
+    latest = cf.iloc[:, 0]
+    result = {row: val for row, val in latest.items() if pd.notna(val)}
+    logger.info("yfinance cashflow for %s: %d items", symbol, len(result))
+    return result
+
+
 async def get_balance_sheet(symbol: str) -> Optional[dict]:
     loop = asyncio.get_running_loop()
     logger.info("Fetching yfinance balance sheet for %s", symbol)
     return await loop.run_in_executor(_executor, _fetch_balance_sheet, symbol)
+
+
+async def get_cashflow(symbol: str) -> Optional[dict]:
+    loop = asyncio.get_running_loop()
+    logger.info("Fetching yfinance cashflow for %s", symbol)
+    return await loop.run_in_executor(_executor, _fetch_cashflow, symbol)
 
 
 async def get_income_stmt(symbol: str) -> Optional[dict]:
