@@ -470,3 +470,21 @@ async def get_position_history(symbol: str) -> dict:
             for t in txs
         ],
     }
+
+
+@router.post(
+    "/portfolio/reset",
+    summary="Reset Portfolio",
+    description="Clears all positions while preserving settings.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def reset_portfolio() -> dict:
+    data = cache_get(_PORTFOLIO_NS, _PORTFOLIO_KEY) or {}
+    settings = data.get("settings", {"monthly_budget": 0.0, "currency_display": "USD"})
+    cache_set(
+        _PORTFOLIO_NS,
+        _PORTFOLIO_KEY,
+        {"positions": [], "settings": settings},
+        ttl=_PORTFOLIO_TTL,
+    )
+    return {"message": "Portfolio réinitialisé", "positions": 0}
