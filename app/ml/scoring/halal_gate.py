@@ -12,26 +12,23 @@ Returns a gate result; non-compliant companies are excluded from composite scori
 from typing import Optional
 
 _HARAM_SECTOR_KEYWORDS = [
-    "alcohol", "beer", "wine", "spirits", "liquor", "brewing", "distill",
+    # Alcool
+    "alcohol", "beer", "wine", "spirits", "liquor", "brewing",
+    # Tabac
     "tobacco", "cigarette",
+    # Jeux d'argent
     "gambling", "casino", "betting", "lottery",
-    "weapon", "defense", "arms", "ammunition", "military",
+    # Armement (termes précis uniquement — "defense" et "arms" exclus car trop larges)
+    "weapons", "ammunition",
+    # Porc
     "pork", "swine",
+    # Contenu adulte
     "adult entertainment", "pornograph",
+    # Cannabis
     "cannabis", "marijuana",
-    "bank", "insurance", "financial services", "mortgage", "lending",
-    "riba", "interest income",
+    # Finance à intérêt (riba)
+    "bank", "insurance", "mortgage", "lending", "riba",
 ]
-
-_EXCLUDED_SECTORS = {
-    "consumer defensive",  # may include tobacco / alcohol
-}
-
-_BANK_SECTORS = {
-    "financial services",
-    "banks",
-    "insurance",
-}
 
 
 def _keyword_hit(text: Optional[str]) -> Optional[str]:

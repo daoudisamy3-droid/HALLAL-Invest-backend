@@ -424,6 +424,8 @@ async def update_settings(body: SettingsBody) -> dict:
 )
 async def get_position_history(symbol: str) -> dict:
     symbol = _validate_symbol(symbol)
+    logger.info("history/%s: début fetch", symbol)
+
     portfolio = _load_portfolio()
 
     pos = next((p for p in portfolio["positions"] if p["symbol"] == symbol), None)
@@ -435,16 +437,17 @@ async def get_position_history(symbol: str) -> dict:
     yf_sym = _yf_symbol(symbol, currency)
 
     bars: list[dict] = []
+    source = "none"
+
     if txs:
         first_date = min(t["date"] for t in txs)
+
+        # ── Primary: Alpaca via fetch_ohlcv ───────────────────────
         try:
             first_dt = datetime.strptime(first_date, "%Y-%m-%d")
             days_needed = (datetime.now() - first_dt).days + 30
             limit = max(days_needed, 90)
-        except Exception:
-            limit = 500
 
-        try:
             from app.ml.data_loader import fetch_ohlcv
             df = await fetch_ohlcv(yf_sym, limit=limit)
             if not df.empty and "timestamp" in df.columns:
@@ -454,8 +457,43 @@ async def get_position_history(symbol: str) -> dict:
                     {"date": row["date_str"], "close": round(float(row["close"]), 4)}
                     for _, row in df_filtered.iterrows()
                 ]
+                source = "alpaca"
         except Exception as exc:
-            logger.warning("portfolio/history/%s: fetch_ohlcv failed: %s", symbol, exc)
+            logger.warning("history/%s: Alpaca failed (%s), trying YFinance", symbol, exc)
+
+        # ── Fallback: YFinance ────────────────────────────────────
+        if not bars:
+            try:
+                loop = asyncio.get_running_loop()
+
+                def _yf_history() -> list[dict]:
+                    ticker = yf.Ticker(yf_sym)
+                    hist = ticker.history(start=first_date)
+                    if hist.empty:
+                        return []
+                    return [
+                        {"date": str(idx.date()), "close": round(float(row["Close"]), 4)}
+                        for idx, row in hist.iterrows()
+                    ]
+
+                bars = await loop.run_in_executor(None, _yf_history)
+                source = "yfinance"
+            except Exception as exc:
+                logger.warning("history/%s: YFinance fallback also failed: %s", symbol, exc)
+
+    logger.info("history/%s: %d bars via %s", symbol, len(bars), source)
+
+    if not bars and txs:
+        return {
+            "symbol": symbol,
+            "bars": [],
+            "transactions": [
+                {"date": t["date"], "price": t["price"],
+                 "shares": t["shares"], "type": t["type"]}
+                for t in txs
+            ],
+            "error": "Historique non disponible",
+        }
 
     return {
         "symbol": symbol,
@@ -479,12 +517,7 @@ async def get_position_history(symbol: str) -> dict:
     dependencies=[Depends(rate_limit_dependency)],
 )
 async def reset_portfolio() -> dict:
-    data = cache_get(_PORTFOLIO_NS, _PORTFOLIO_KEY) or {}
-    settings = data.get("settings", {"monthly_budget": 0.0, "currency_display": "USD"})
-    cache_set(
-        _PORTFOLIO_NS,
-        _PORTFOLIO_KEY,
-        {"positions": [], "settings": settings},
-        ttl=_PORTFOLIO_TTL,
-    )
+    portfolio = _load_portfolio()
+    settings = portfolio.get("settings", {"monthly_budget": 0.0, "currency_display": "USD"})
+    _save_portfolio({"positions": [], "settings": settings})
     return {"message": "Portfolio réinitialisé", "positions": 0}
