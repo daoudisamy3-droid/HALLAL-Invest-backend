@@ -176,13 +176,6 @@ async def compute_entry_plan(symbol: str, sector: str = "") -> dict:
         entry_2 = max(fibs["fib_500"], s0 if s0 else ma50 * 0.95)
         entry_3 = max(fibs["fib_618"], ma200 * 1.01)
         stop_loss = min(fibs["fib_786"], ma200 * 0.97)
-        entry_recommended = entry_1
-        scenario_note = (
-            f"Action en tendance haussière. "
-            f"Attendre un pull-back vers la zone Fibonacci 38.2% "
-            f"(${entry_1:.2f}) avant d'entrer. "
-            f"Ne pas chasser le prix actuel."
-        )
         invalidation_note = (
             f"Sortir si clôture sous ${stop_loss:.2f} "
             f"(Fibonacci 78.6% / MA200 — thèse haussière invalidée)."
@@ -193,14 +186,6 @@ async def compute_entry_plan(symbol: str, sector: str = "") -> dict:
         entry_2 = max(fibs["fib_618"], s0 if s0 else current_price * 0.95)
         entry_3 = ma200 * 1.01
         stop_loss = ma200 * 0.96
-        entry_recommended = entry_1
-        scenario_note = (
-            f"Action en phase de correction. "
-            f"Le prix offre une opportunité d'entrée "
-            f"si les fondamentaux sont solides (Score > 60). "
-            f"Entrée possible maintenant à ${current_price:.2f} "
-            f"avec stop sous MA200."
-        )
         invalidation_note = (
             f"Sortir si clôture sous ${stop_loss:.2f} "
             f"(MA200 × 0.96 — correction devient tendance baissière)."
@@ -211,18 +196,38 @@ async def compute_entry_plan(symbol: str, sector: str = "") -> dict:
         entry_2 = supports[1] if len(supports) > 1 else current_price * 0.94
         entry_3 = fibs["fib_0"]
         stop_loss = round(fibs["fib_0"] * 0.97, 2)
-        entry_recommended = min(entry_1, current_price)
-        scenario_note = (
-            f"Action sous MA200 (${ma200:.2f}) — contexte technique "
-            f"défavorable mais à surveiller. "
-            f"Entrée possible sur support à ${entry_1:.2f} "
-            f"uniquement si RSI < 40 ET Score fondamental > 60. "
-            f"Ne pas entrer au prix actuel sans confirmation."
-        )
         invalidation_note = (
             f"Stop loss à ${stop_loss:.2f} "
             f"(sous le plus bas 52 semaines ${fibs['fib_0']:.2f}). "
             f"Si ce niveau est cassé, la thèse est invalidée."
+        )
+
+    # ── Sort entry levels low→high; tranche 1 = highest (first reached descending) ──
+    levels = sorted([entry_1, entry_2, entry_3])
+    entry_low, entry_mid, entry_high = levels[0], levels[1], levels[2]
+    entry_recommended = entry_high
+
+    if scenario == "TENDANCE_HAUSSIÈRE":
+        scenario_note = (
+            f"Action en tendance haussière. "
+            f"Attendre un pull-back vers ${entry_high:.2f} avant d'entrer. "
+            f"Ne pas chasser le prix actuel."
+        )
+    elif scenario == "CORRECTION":
+        scenario_note = (
+            f"Action en phase de correction. "
+            f"Le prix offre une opportunité d'entrée "
+            f"si les fondamentaux sont solides (Score > 60). "
+            f"Entrée possible maintenant à ${entry_high:.2f} "
+            f"avec stop sous MA200."
+        )
+    else:
+        scenario_note = (
+            f"Action sous MA200 (${ma200:.2f}) — contexte technique "
+            f"défavorable mais à surveiller. "
+            f"Entrée possible sur support à ${entry_high:.2f} "
+            f"uniquement si RSI < 40 ET Score fondamental > 60. "
+            f"Ne pas entrer au prix actuel sans confirmation."
         )
 
     # ── Take profit levels ────────────────────────────────────────
@@ -242,28 +247,28 @@ async def compute_entry_plan(symbol: str, sector: str = "") -> dict:
     reward_dist = tp_1 - entry_rec_r
     rr = round(reward_dist / risk_dist, 2) if risk_dist > 0 else 0.0
 
-    # ── DCA plan ──────────────────────────────────────────────────
+    # ── DCA plan (tranches sorted high→low price) ─────────────────
     dca_plan = [
         {
             "tranche": 1,
             "pct_position": 50,
-            "prix": round(entry_recommended, 2),
-            "condition": f"Prix atteint ${entry_recommended:.2f}",
-            "note": "Première position — moitié du sizing prévu",
+            "prix": round(entry_high, 2),
+            "condition": f"Prix atteint ${entry_high:.2f}",
+            "note": "Première position — premier niveau de pull-back",
         },
         {
             "tranche": 2,
             "pct_position": 30,
-            "prix": round(entry_2, 2),
-            "condition": f"Si correction vers ${entry_2:.2f}",
-            "note": "Renforcement sur support — améliore le prix moyen",
+            "prix": round(entry_mid, 2),
+            "condition": f"Si correction vers ${entry_mid:.2f}",
+            "note": "Renforcement — pull-back plus profond",
         },
         {
             "tranche": 3,
             "pct_position": 20,
-            "prix": round(entry_3, 2),
-            "condition": f"Rebond confirmé sur ${entry_3:.2f}",
-            "note": "Dernier renforcement — niveau de sécurité maximum",
+            "prix": round(entry_low, 2),
+            "condition": f"Rebond confirmé sur ${entry_low:.2f}",
+            "note": "Dernier renforcement — support maximum",
         },
     ]
 
@@ -274,9 +279,9 @@ async def compute_entry_plan(symbol: str, sector: str = "") -> dict:
         "current_price": current_price,
         "entry_recommended": round(entry_recommended, 2),
         "entry_levels": {
-            "entry_1": round(entry_1, 2),
-            "entry_2": round(entry_2, 2),
-            "entry_3": round(entry_3, 2),
+            "entry_1": round(entry_high, 2),
+            "entry_2": round(entry_mid, 2),
+            "entry_3": round(entry_low, 2),
         },
         "stop_loss": stop_r,
         "invalidation_note": invalidation_note,
