@@ -472,7 +472,7 @@ async def get_position_history(symbol: str) -> dict:
     }
 
 
-@router.post(
+@router.get(
     "/portfolio/reset",
     summary="Reset Portfolio",
     description="Clears all positions while preserving settings.",
