@@ -230,22 +230,26 @@ async def compute_entry_plan(symbol: str, sector: str = "") -> dict:
             f"Ne pas entrer au prix actuel sans confirmation."
         )
 
-    # ── Take profit levels ────────────────────────────────────────
+    # ── Take profit levels (resistances above current price) ──────
+    swing_high = fibs["swing_high"]
     if scenario == "TENDANCE_HAUSSIÈRE":
         tp_1 = round(current_price * 1.08, 2)
-        tp_2 = fibs["fib_100"]
-        tp_3 = round(fibs["fib_100"] * 1.10, 2)
-    else:
+        tp_2 = round(swing_high * 1.05, 2)
+        tp_3 = round(swing_high * 1.12, 2)
+    elif scenario == "CORRECTION":
         tp_1 = round(ma50 * 1.01, 2)
+        tp_2 = round(ma200 * 1.02, 2) if ma200 > ma50 else round(ma50 * 1.05, 2)
+        tp_3 = round(fibs["fib_786"], 2)
+    else:  # SOUS_MA200
+        tp_1 = round(ma200 * 0.99, 2)
         tp_2 = round(ma200 * 1.02, 2)
-        tp_3 = fibs["fib_618"]
+        tp_3 = round(ma50 * 1.01, 2)
 
     # ── R/R on recommended entry ──────────────────────────────────
-    entry_rec_r = round(entry_recommended, 2)
     stop_r = round(stop_loss, 2)
-    risk_dist = entry_rec_r - stop_r
-    reward_dist = tp_1 - entry_rec_r
-    rr = round(reward_dist / risk_dist, 2) if risk_dist > 0 else 0.0
+    potential_gain = tp_1 - entry_recommended
+    potential_loss = entry_recommended - stop_r
+    rr = round(potential_gain / potential_loss, 2) if potential_loss > 0 else 0.0
 
     # ── DCA plan (tranches sorted high→low price) ─────────────────
     dca_plan = [
