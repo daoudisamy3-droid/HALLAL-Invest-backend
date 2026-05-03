@@ -9,9 +9,15 @@ Fetches in parallel:
   - risk_intelligence()     → stop/TP, R/R ratio, RSI, conviction
   - get_prediction()        → ML direction + confidence
   - calendar()              → earnings dates, dividend
+  - compute_entry_plan()    → OHLCV-based Fibonacci, supports, DCA levels
+  - fetch_market_context()  → macro (FRED) + sector (ETF/commodity)
 
-Computes: signal_global (0-100), verdict, sizing in EUR, entry conditions,
-and a structured catalyst block.
+Signal weights:
+  composite_score  × 0.35
+  rr_normalized    × 0.20
+  pred_confidence  × 0.15
+  timing_score     × 0.15
+  context_score    × 0.15
 
 Cache TTL: 1 hour.
 """
@@ -253,6 +259,8 @@ async def get_plan(symbol: str) -> dict:
     # ── Import endpoint functions (safe: no Depends in signatures) ─
     from app.api.v1.endpoints.risk import risk_intelligence
     from app.api.v1.endpoints.calendar import calendar
+    from app.ml.scoring.entry_engine import compute_entry_plan
+    from app.ml.scoring.market_context import fetch_market_context
 
     # ── Parallel fetch of all signals ─────────────────────────────
     results = await asyncio.gather(
@@ -260,21 +268,31 @@ async def get_plan(symbol: str) -> dict:
         risk_intelligence(symbol),
         get_prediction(symbol),
         calendar(symbol),
+        compute_entry_plan(symbol),
         return_exceptions=True,
     )
 
-    score_raw, risk_raw, pred_raw, cal_raw = results
+    score_raw, risk_raw, pred_raw, cal_raw, entry_raw = results
 
     # Safe extraction with fallback empty dicts
     score: dict = score_raw if isinstance(score_raw, dict) else {}
     risk: dict = risk_raw if isinstance(risk_raw, dict) else {}
     pred: dict = pred_raw if isinstance(pred_raw, dict) else {}
     cal: dict = cal_raw if isinstance(cal_raw, dict) else {}
+    entry_plan: dict = entry_raw if isinstance(entry_raw, dict) else {"available": False}
 
     for name, exc in [("score", score_raw), ("risk", risk_raw),
-                      ("pred", pred_raw), ("cal", cal_raw)]:
+                      ("pred", pred_raw), ("cal", cal_raw), ("entry", entry_raw)]:
         if isinstance(exc, Exception):
             logger.warning("plan/%s: %s fetch failed: %s", symbol, name, exc)
+
+    # ── Sector for market context (from score data) ───────────────
+    sector: str = (score.get("halal") or {}).get("sector") or ""
+    market_ctx: dict = {"context_score": 50.0, "context_signal": "NEUTRE"}
+    try:
+        market_ctx = await fetch_market_context(symbol, sector)
+    except Exception as exc:
+        logger.warning("plan/%s: market_context failed: %s", symbol, exc)
 
     # ── Extract key values ─────────────────────────────────────────
     composite_score = _safe(score.get("composite_score"), 50.0)
@@ -311,12 +329,14 @@ async def get_plan(symbol: str) -> dict:
     rr_norm = _rr_normalized(rr_ratio)
     timing = _timing_score(days_to_earnings, rsi, ma200_ratio)
     conf_score = pred_confidence * 100.0
+    context_score = _safe((market_ctx or {}).get("context_score"), 50.0)
 
     signal_global = _clamp(
-        0.40 * composite_score
-        + 0.25 * rr_norm
+        0.35 * composite_score
+        + 0.20 * rr_norm
         + 0.15 * conf_score
-        + 0.20 * timing
+        + 0.15 * timing
+        + 0.15 * context_score
     )
     signal_global = round(signal_global, 1)
 
@@ -363,6 +383,7 @@ async def get_plan(symbol: str) -> dict:
             "timing_score": round(timing, 1),
             "rr_normalized": round(rr_norm, 1),
             "prediction_confidence": round(conf_score, 1),
+            "context_score": round(context_score, 1),
         },
         "entry_conditions": entry_conditions,
         "catalysts": {
@@ -381,11 +402,14 @@ async def get_plan(symbol: str) -> dict:
             "ma200_signal": ma200_signal,
             "days_to_earnings": days_to_earnings,
         },
+        "entry_plan": entry_plan,
+        "market_context": market_ctx,
     }
 
     cache_set(_PLAN_NS, symbol, result, ttl=_PLAN_TTL)
     logger.info(
-        "plan/%s: signal=%.1f verdict=%s timing=%.1f rr_norm=%.1f conf=%.1f",
+        "plan/%s: signal=%.1f verdict=%s timing=%.1f rr_norm=%.1f conf=%.1f ctx=%.1f scenario=%s",
         symbol, signal_global, verdict, timing, rr_norm, conf_score,
+        context_score, (entry_plan or {}).get("scenario", "N/A"),
     )
     return result
