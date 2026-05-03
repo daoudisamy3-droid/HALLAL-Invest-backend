@@ -207,19 +207,22 @@ async def compute_entry_plan(symbol: str, sector: str = "") -> dict:
         )
 
     else:  # SOUS_MA200
-        entry_1 = ma200 * 0.99
-        entry_2 = s0 if s0 else current_price * 0.90
+        entry_1 = supports[0] if supports else current_price * 0.97
+        entry_2 = supports[1] if len(supports) > 1 else current_price * 0.94
         entry_3 = fibs["fib_0"]
-        stop_loss = current_price * 0.93
-        entry_recommended = entry_1
+        stop_loss = round(fibs["fib_0"] * 0.97, 2)
+        entry_recommended = min(entry_1, current_price)
         scenario_note = (
-            f"Action sous MA200 — tendance baissière. "
-            f"Entrée uniquement si RSI < 35 ET Score > 65. "
-            f"Risque élevé. Sizing réduit recommandé."
+            f"Action sous MA200 (${ma200:.2f}) — contexte technique "
+            f"défavorable mais à surveiller. "
+            f"Entrée possible sur support à ${entry_1:.2f} "
+            f"uniquement si RSI < 40 ET Score fondamental > 60. "
+            f"Ne pas entrer au prix actuel sans confirmation."
         )
         invalidation_note = (
-            f"Stop serré à ${stop_loss:.2f} (-7% depuis le prix actuel). "
-            f"Sortir immédiatement si la thèse de retournement ne se confirme pas."
+            f"Stop loss à ${stop_loss:.2f} "
+            f"(sous le plus bas 52 semaines ${fibs['fib_0']:.2f}). "
+            f"Si ce niveau est cassé, la thèse est invalidée."
         )
 
     # ── Take profit levels ────────────────────────────────────────
