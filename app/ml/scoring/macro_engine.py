@@ -2,12 +2,12 @@
 Macro Engine — global market data, enriched FRED series, market regime, economic calendar.
 
 Reuses fetch_fred_macro() from market_context.py (no duplication).
-Adds: global market tickers, extra FRED series, regime scoring, calendar.
+Adds: indices, FX, commodities (via _fetch_category_blocking), regime scoring, calendar.
 
 Cache TTL:
-  global_markets  — 15 min (quasi real-time)
-  fred_enriched   — 1 h
-  full dashboard  — 15 min
+  indices / fx / commodities — 15 min
+  fred_enriched              — 1 h
+  full dashboard             — 15 min
 """
 
 import asyncio
@@ -15,92 +15,205 @@ import os
 from datetime import date
 
 import httpx
-import yfinance as yf
 
 from app.core.cache import cache_get, cache_set
 from app.core.logging import logger
 
 _NS = "macro_dashboard"
 
-TICKERS_GLOBAUX = {
-    "sp500":  {"ticker": "^GSPC",    "label": "S&P 500",      "type": "index"},
-    "nasdaq": {"ticker": "^IXIC",    "label": "NASDAQ",       "type": "index"},
-    "vix":    {"ticker": "^VIX",     "label": "VIX",          "type": "fear"},
-    "oil":    {"ticker": "CL=F",     "label": "Pétrole WTI",  "type": "commodity"},
-    "gold":   {"ticker": "GC=F",     "label": "Or",           "type": "commodity"},
-    "copper": {"ticker": "HG=F",     "label": "Cuivre",       "type": "commodity"},
-    "eurusd": {"ticker": "EURUSD=X", "label": "EUR/USD",      "type": "fx"},
-    "dxy":    {"ticker": "DX-Y.NYB", "label": "Dollar DXY",   "type": "fx"},
-    "tnx":    {"ticker": "^TNX",     "label": "10Y Treasury", "type": "rates"},
-    "tyx":    {"ticker": "^TYX",     "label": "30Y Treasury", "type": "rates"},
+# ── Ticker catalogs ───────────────────────────────────────────────
+
+INDICES = {
+    # Americas
+    "sp500":   {"ticker": "^GSPC",     "label": "S&P 500",       "region": "Americas"},
+    "nasdaq":  {"ticker": "^IXIC",     "label": "NASDAQ",        "region": "Americas"},
+    "dow":     {"ticker": "^DJI",      "label": "Dow Jones",     "region": "Americas"},
+    "russell": {"ticker": "^RUT",      "label": "Russell 2000",  "region": "Americas"},
+    "tsx":     {"ticker": "^GSPTSE",   "label": "S&P TSX",       "region": "Americas"},
+    "bovespa": {"ticker": "^BVSP",     "label": "Bovespa",       "region": "Americas"},
+    # Europe
+    "dax":     {"ticker": "^GDAXI",    "label": "DAX",           "region": "Europe"},
+    "cac":     {"ticker": "^FCHI",     "label": "CAC 40",        "region": "Europe"},
+    "ftse":    {"ticker": "^FTSE",     "label": "FTSE 100",      "region": "Europe"},
+    "stoxx":   {"ticker": "^STOXX50E", "label": "EURO STOXX 50", "region": "Europe"},
+    # Asia-Pacific
+    "nikkei":  {"ticker": "^N225",     "label": "Nikkei 225",    "region": "Asia"},
+    "hsi":     {"ticker": "^HSI",      "label": "Hang Seng",     "region": "Asia"},
+    "sti":     {"ticker": "^STI",      "label": "STI Singapore", "region": "Asia"},
+    "asx":     {"ticker": "^AXJO",     "label": "ASX 200",       "region": "Asia"},
+    "kospi":   {"ticker": "^KS11",     "label": "KOSPI",         "region": "Asia"},
+    "nifty":   {"ticker": "^NSEI",     "label": "NIFTY 50",      "region": "Asia"},
+    "sse":     {"ticker": "000001.SS", "label": "SSE Composite", "region": "Asia"},
+    # Volatility
+    "vix":     {"ticker": "^VIX",      "label": "VIX",           "region": "Fear"},
+}
+
+FX = {
+    # USD majors
+    "eurusd": {"ticker": "EURUSD=X", "label": "EUR/USD", "group": "Majeurs"},
+    "gbpusd": {"ticker": "GBPUSD=X", "label": "GBP/USD", "group": "Majeurs"},
+    "usdjpy": {"ticker": "JPY=X",    "label": "USD/JPY", "group": "Majeurs"},
+    "usdchf": {"ticker": "CHF=X",    "label": "USD/CHF", "group": "Majeurs"},
+    "usdcad": {"ticker": "CAD=X",    "label": "USD/CAD", "group": "Majeurs"},
+    "audusd": {"ticker": "AUDUSD=X", "label": "AUD/USD", "group": "Majeurs"},
+    "nzdusd": {"ticker": "NZDUSD=X", "label": "NZD/USD", "group": "Majeurs"},
+    "dxy":    {"ticker": "DX-Y.NYB", "label": "DXY",     "group": "Majeurs"},
+    # EUR crosses
+    "eurgbp": {"ticker": "EURGBP=X", "label": "EUR/GBP", "group": "EUR Cross"},
+    "eurjpy": {"ticker": "EURJPY=X", "label": "EUR/JPY", "group": "EUR Cross"},
+    "eurchf": {"ticker": "EURCHF=X", "label": "EUR/CHF", "group": "EUR Cross"},
+    "eurcad": {"ticker": "EURCAD=X", "label": "EUR/CAD", "group": "EUR Cross"},
+    "eurcny": {"ticker": "EURCNY=X", "label": "EUR/CNY", "group": "EUR Cross"},
+    # Asia & EM
+    "usdcny": {"ticker": "CNY=X",    "label": "USD/CNY", "group": "Asie"},
+    "usdhkd": {"ticker": "USDHKD=X", "label": "USD/HKD", "group": "Asie"},
+    "usdsgd": {"ticker": "USDSGD=X", "label": "USD/SGD", "group": "Asie"},
+    "usdinr": {"ticker": "USDINR=X", "label": "USD/INR", "group": "Asie"},
+    "usdmyr": {"ticker": "USDMYR=X", "label": "USD/MYR", "group": "Asie"},
+    "usdmxn": {"ticker": "USDMXN=X", "label": "USD/MXN", "group": "Émergents"},
+    "usdzar": {"ticker": "USDZAR=X", "label": "USD/ZAR", "group": "Émergents"},
+    "usdbrl": {"ticker": "BRL=X",    "label": "USD/BRL", "group": "Émergents"},
+}
+
+COMMODITIES = {
+    # Energy
+    "oil_wti":   {"ticker": "CL=F", "label": "Pétrole WTI", "group": "Énergie",           "unit": "$/bbl"},
+    "oil_brent": {"ticker": "BZ=F", "label": "Brent Crude", "group": "Énergie",           "unit": "$/bbl"},
+    "natgas":    {"ticker": "NG=F", "label": "Gaz Naturel", "group": "Énergie",           "unit": "$/MMBtu"},
+    # Precious metals
+    "gold":      {"ticker": "GC=F", "label": "Or",          "group": "Métaux Précieux",   "unit": "$/oz"},
+    "silver":    {"ticker": "SI=F", "label": "Argent",      "group": "Métaux Précieux",   "unit": "$/oz"},
+    # Industrial metals
+    "copper":    {"ticker": "HG=F", "label": "Cuivre",      "group": "Métaux Industriels","unit": "$/lb"},
+    # Agriculture
+    "wheat":     {"ticker": "KE=F", "label": "Blé",         "group": "Agriculture",       "unit": "cents/bu"},
+    "corn":      {"ticker": "ZC=F", "label": "Maïs",        "group": "Agriculture",       "unit": "cents/bu"},
+    "soybean":   {"ticker": "ZS=F", "label": "Soja",        "group": "Agriculture",       "unit": "cents/bu"},
+    "coffee":    {"ticker": "KC=F", "label": "Café",        "group": "Agriculture",       "unit": "cents/lb"},
+    "sugar":     {"ticker": "SB=F", "label": "Sucre",       "group": "Agriculture",       "unit": "cents/lb"},
+    "cocoa":     {"ticker": "CC=F", "label": "Cacao",       "group": "Agriculture",       "unit": "$/t"},
+    "cotton":    {"ticker": "CT=F", "label": "Coton",       "group": "Agriculture",       "unit": "cents/lb"},
+    # Livestock
+    "cattle":    {"ticker": "LE=F", "label": "Bœuf",        "group": "Élevage",           "unit": "cents/lb"},
+    "hogs":      {"ticker": "HE=F", "label": "Porc",        "group": "Élevage",           "unit": "cents/lb"},
 }
 
 FRED_EXTRA_SERIES = {
-    "yield_curve":  "T10Y2Y",    # Spread 10Y-2Y (récession si < 0)
-    "treasury_10y": "DGS10",     # Taux 10Y
-    "treasury_2y":  "DGS2Y",     # Taux 2Y
-    "pce":          "PCEPI",     # PCE inflation (cible Fed)
-    "retail_sales": "RSAFS",     # Ventes au détail
-    "ism_mfg":      "MANEMP",    # Emploi manufacturier proxy
+    "yield_curve":  "T10Y2Y",  # Spread 10Y-2Y (récession si < 0)
+    "treasury_10y": "DGS10",   # Taux 10Y
+    "treasury_2y":  "DGS2Y",   # Taux 2Y
+    "pce":          "PCEPI",   # PCE inflation (cible Fed)
+    "retail_sales": "RSAFS",   # Ventes au détail
+    "ism_mfg":      "MANEMP",  # Emploi manufacturier proxy
 }
 
 _FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 
 
-# ── Global markets ────────────────────────────────────────────────
+# ── Generic blocking fetcher ──────────────────────────────────────
 
-def _fetch_all_markets_blocking() -> dict:
+def _fetch_category_blocking(tickers_dict: dict) -> dict:
+    """Generic YFinance fetch for any category dict. Run in executor."""
+    import yfinance as yf
+
     results: dict = {}
-    for key, cfg in TICKERS_GLOBAUX.items():
+    for key, cfg in tickers_dict.items():
         try:
             t = yf.Ticker(cfg["ticker"])
-            info = t.fast_info
-            price = float(info.get("last_price") or 0)
-            prev = float(info.get("previous_close") or price)
-            change_pct = (price - prev) / prev * 100 if prev else 0.0
+            fast = t.fast_info
+            price = float(fast.get("last_price") or 0)
+            prev_close = float(fast.get("previous_close") or price)
+            change_pct = (price - prev_close) / prev_close * 100 if prev_close else 0.0
 
             hist = t.history(period="3mo")
-            perf_1m = perf_3m = None
+            perf_1w = perf_1m = perf_3m = None
+
             if not hist.empty:
                 p_now = float(hist["Close"].iloc[-1])
+                if price == 0:
+                    price = p_now
+                    if len(hist) >= 2:
+                        p_prev = float(hist["Close"].iloc[-2])
+                        change_pct = (p_now - p_prev) / p_prev * 100 if p_prev else 0.0
+                if len(hist) >= 5:
+                    perf_1w = round(
+                        (p_now - float(hist["Close"].iloc[-5]))
+                        / float(hist["Close"].iloc[-5]) * 100, 2
+                    )
                 if len(hist) >= 21:
                     perf_1m = round(
                         (p_now - float(hist["Close"].iloc[-21]))
                         / float(hist["Close"].iloc[-21]) * 100, 2
                     )
-                if len(hist) >= 63:
+                if len(hist) >= 60:
                     perf_3m = round(
                         (p_now - float(hist["Close"].iloc[0]))
                         / float(hist["Close"].iloc[0]) * 100, 2
                     )
 
-            results[key] = {
+            entry: dict = {
                 "label": cfg["label"],
-                "type": cfg["type"],
                 "price": round(price, 4),
                 "change_pct": round(change_pct, 2),
+                "perf_1w": perf_1w,
                 "perf_1m": perf_1m,
                 "perf_3m": perf_3m,
                 "trend": "hausse" if change_pct > 0 else "baisse",
             }
+            for field in ("region", "group", "unit"):
+                if field in cfg:
+                    entry[field] = cfg[field]
+
+            results[key] = entry
+
         except Exception as exc:
-            logger.warning("macro_engine/global_markets/%s: %s", key, exc)
-            results[key] = None
+            logger.warning("macro_engine/fetch/%s (%s): %s", key, cfg["ticker"], exc)
+            results[key] = {
+                "label": cfg.get("label", key),
+                "price": None,
+                "change_pct": None,
+                "perf_1w": None,
+                "perf_1m": None,
+                "perf_3m": None,
+                "trend": None,
+            }
+
     return results
 
 
-async def fetch_global_markets() -> dict:
-    """Fetch all global market tickers via YFinance. Cache 15 min."""
-    cached = cache_get(_NS, "global_markets")
+# ── Per-category async wrappers ───────────────────────────────────
+
+async def fetch_indices() -> dict:
+    cached = cache_get(_NS, "indices")
     if cached:
         return cached
-
     loop = asyncio.get_running_loop()
-    results = await loop.run_in_executor(None, _fetch_all_markets_blocking)
+    result = await loop.run_in_executor(None, _fetch_category_blocking, INDICES)
+    cache_set(_NS, "indices", result, ttl=900)
+    logger.info("macro_engine: indices fetched (%d)", len(result))
+    return result
 
-    cache_set(_NS, "global_markets", results, ttl=900)
-    logger.info("macro_engine: global_markets fetched (%d tickers)", len(results))
-    return results
+
+async def fetch_fx() -> dict:
+    cached = cache_get(_NS, "fx")
+    if cached:
+        return cached
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _fetch_category_blocking, FX)
+    cache_set(_NS, "fx", result, ttl=900)
+    logger.info("macro_engine: fx fetched (%d)", len(result))
+    return result
+
+
+async def fetch_commodities() -> dict:
+    cached = cache_get(_NS, "commodities")
+    if cached:
+        return cached
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _fetch_category_blocking, COMMODITIES)
+    cache_set(_NS, "commodities", result, ttl=900)
+    logger.info("macro_engine: commodities fetched (%d)", len(result))
+    return result
 
 
 # ── FRED enriched ─────────────────────────────────────────────────
@@ -158,7 +271,7 @@ async def fetch_fred_enriched() -> dict:
 
 # ── Market regime ─────────────────────────────────────────────────
 
-def compute_market_regime(fred_base: dict, fred_extra: dict, markets: dict) -> dict:
+def compute_market_regime(fred_base: dict, fred_extra: dict, indices: dict) -> dict:
     """
     Scores the global market regime from all data sources.
     Returns RISK-ON / NEUTRE / RISK-OFF with score 0-100.
@@ -168,7 +281,7 @@ def compute_market_regime(fred_base: dict, fred_extra: dict, markets: dict) -> d
     warnings: list[str] = []
 
     # VIX
-    vix = (markets.get("vix") or {})
+    vix = (indices.get("vix") or {})
     v = vix.get("price")
     if v:
         if v < 15:
@@ -232,7 +345,7 @@ def compute_market_regime(fred_base: dict, fred_extra: dict, markets: dict) -> d
             warnings.append(f"Spreads crédit larges ({spread:.2f}%) — fuite risque")
 
     # S&P 500 1-month trend
-    sp500 = (markets.get("sp500") or {})
+    sp500 = (indices.get("sp500") or {})
     p1m = sp500.get("perf_1m")
     if p1m is not None:
         if p1m > 3:
@@ -343,10 +456,12 @@ async def fetch_full_macro() -> dict:
 
     from app.ml.scoring.market_context import fetch_fred_macro
 
-    fred_base, fred_extra, markets = await asyncio.gather(
+    fred_base, fred_extra, indices, fx, commodities = await asyncio.gather(
         fetch_fred_macro(),
         fetch_fred_enriched(),
-        fetch_global_markets(),
+        fetch_indices(),
+        fetch_fx(),
+        fetch_commodities(),
         return_exceptions=True,
     )
 
@@ -356,17 +471,25 @@ async def fetch_full_macro() -> dict:
     if isinstance(fred_extra, Exception):
         logger.warning("macro_engine: fred_extra failed: %s", fred_extra)
         fred_extra = {}
-    if isinstance(markets, Exception):
-        logger.warning("macro_engine: markets failed: %s", markets)
-        markets = {}
+    if isinstance(indices, Exception):
+        logger.warning("macro_engine: indices failed: %s", indices)
+        indices = {}
+    if isinstance(fx, Exception):
+        logger.warning("macro_engine: fx failed: %s", fx)
+        fx = {}
+    if isinstance(commodities, Exception):
+        logger.warning("macro_engine: commodities failed: %s", commodities)
+        commodities = {}
 
-    regime = compute_market_regime(fred_base, fred_extra, markets)
+    regime = compute_market_regime(fred_base, fred_extra, indices)
     calendar = build_economic_calendar()
 
     result = {
         "regime": regime,
         "fred": {**fred_base, **fred_extra},
-        "markets": markets,
+        "indices": indices,
+        "fx": fx,
+        "commodities": commodities,
         "calendar": calendar,
         "cached_at": str(datetime.datetime.utcnow()),
     }
