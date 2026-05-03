@@ -11,6 +11,7 @@ from app.api.v1.endpoints.rels import router as rels_router
 from app.api.v1.endpoints.score import router as score_router
 from app.api.v1.endpoints.portfolio import router as portfolio_router
 from app.api.v1.endpoints.plan import router as plan_router
+from app.api.v1.endpoints.macro_dashboard import router as macro_dashboard_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(ticker_router, tags=["Ticker Analysis"])
@@ -24,3 +25,4 @@ api_router.include_router(rels_router, tags=["RELS"])
 api_router.include_router(score_router, tags=["Score Engine"])
 api_router.include_router(portfolio_router, tags=["Portfolio"])
 api_router.include_router(plan_router, tags=["Plan"])
+api_router.include_router(macro_dashboard_router, tags=["Macro Dashboard"])
