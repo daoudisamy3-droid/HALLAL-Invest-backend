@@ -22,7 +22,7 @@ from app.ml.scoring.normalizer import (
 )
 
 
-def _yoy_cagr(current: Optional[float], previous: Optional[float]) -> Optional[float]:
+def _yoy_growth(current: Optional[float], previous: Optional[float]) -> Optional[float]:
     """Single-period YoY growth rate as percentage. Returns None if data missing or prev ≤ 0."""
     if current is None or previous is None or previous <= 0:
         return None
@@ -58,8 +58,8 @@ def compute_growth(data: dict) -> dict:
 
     Returns:
         {
-            "revenue_cagr_pct": float | None,
-            "eps_cagr_pct": float | None,
+            "revenue_growth_pct": float | None,
+            "eps_growth_pct": float | None,
             "net_margin_pct": float | None,
             "fcf_quality": float | None,
             "beat_rate_pct": float | None,
@@ -76,13 +76,13 @@ def compute_growth(data: dict) -> dict:
     earnings_beats: Optional[int] = data.get("earnings_beats")
     earnings_total: Optional[int] = data.get("earnings_total")
 
-    available = revenue is not None or net_income is not None
+    available = revenue is not None and net_income is not None
 
-    # ── Revenue CAGR ──────────────────────────────────────────────
-    revenue_cagr = _yoy_cagr(revenue, revenue_prev)
+    # ── Revenue growth ────────────────────────────────────────────
+    revenue_cagr = _yoy_growth(revenue, revenue_prev)
 
-    # ── EPS CAGR ──────────────────────────────────────────────────
-    eps_cagr = _yoy_cagr(eps, eps_prev)
+    # ── EPS growth ────────────────────────────────────────────────
+    eps_cagr = _yoy_growth(eps, eps_prev)
 
     # ── Net margin ────────────────────────────────────────────────
     net_margin_pct: Optional[float] = None
@@ -115,8 +115,8 @@ def compute_growth(data: dict) -> dict:
     )
 
     return {
-        "revenue_cagr_pct": revenue_cagr,
-        "eps_cagr_pct": eps_cagr,
+        "revenue_growth_pct": revenue_cagr,
+        "eps_growth_pct": eps_cagr,
         "net_margin_pct": net_margin_pct,
         "fcf_quality": fcf_quality,
         "beat_rate_pct": beat_rate_pct,

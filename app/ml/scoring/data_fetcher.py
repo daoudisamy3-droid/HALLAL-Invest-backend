@@ -26,16 +26,6 @@ _CACHE_NS = "scoring_data"
 _CACHE_TTL = 21_600  # 6 hours
 
 
-def _safe(val: Any) -> Optional[float]:
-    if val is None:
-        return None
-    try:
-        f = float(val)
-        return None if (hasattr(f, '__class__') and pd.isna(f)) else f
-    except (ValueError, TypeError):
-        return None
-
-
 def _safe_pd(val: Any) -> Optional[float]:
     """Safe float conversion handling pandas NA values."""
     if val is None:
@@ -158,10 +148,14 @@ async def fetch_scoring_data(symbol: str) -> dict:
     current_liabilities_prev = _bs("totalCurrentLiabilities", "Current Liabilities", prev=True)
     retained_earnings = _bs("retainedEarnings", "Retained Earnings")
     shares_outstanding = (
-        _bs("commonStock", "Common Stock")
+        _bs("commonStockSharesOutstanding", "Ordinary Shares Number")
+        or _bs("weightedAverageShsOut", "Share Issued")
         or _safe_pd(yf_info.get("sharesOutstanding"))
     )
-    shares_outstanding_prev = _bs("commonStock", "Common Stock", prev=True)
+    shares_outstanding_prev = (
+        _bs("commonStockSharesOutstanding", "Ordinary Shares Number", prev=True)
+        or _bs("weightedAverageShsOut", "Share Issued", prev=True)
+    )
     book_value_per_share = _safe_pd(yf_info.get("bookValue"))
     cash = _bs("cashAndCashEquivalents", "Cash And Cash Equivalents")
 

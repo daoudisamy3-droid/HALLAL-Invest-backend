@@ -13,7 +13,7 @@ Composite: 30% RSI + 25% MA200 + 20% MA50 + 15% 52w position + 10% beta
 
 from typing import Optional
 
-from app.ml.scoring.normalizer import normalize_rsi, normalize_position_52w, normalize_linear
+from app.ml.scoring.normalizer import normalize_rsi, normalize_position_52w, normalize_linear, _clamp
 
 
 def _normalize_ma_position(price: Optional[float], ma: Optional[float]) -> float:
@@ -28,8 +28,10 @@ def _normalize_ma_position(price: Optional[float], ma: Optional[float]) -> float
     if price is None or ma is None or ma <= 0:
         return 50.0
     ratio = price / ma
+    if ratio < 0.70:
+        return 15.0  # severe downtrend
     if ratio < 0.85:
-        return normalize_linear(ratio, 0.70, 0.85) * 0.3
+        return _clamp(30.0 + (ratio - 0.70) / 0.15 * 20.0, 10.0, 50.0)
     if ratio < 0.95:
         return 50.0 + (0.95 - ratio) / 0.10 * 20.0
     if ratio <= 1.05:

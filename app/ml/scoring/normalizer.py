@@ -159,7 +159,7 @@ def normalize_fcf_quality(fcf_quality: Optional[float]) -> float:
         return _clamp(40.0 + (fcf_quality - 0.5) / 0.3 * 30.0)
     if fcf_quality >= 0.0:
         return _clamp(fcf_quality / 0.5 * 40.0)
-    return 10.0
+    return 50.0  # NI < 0 with positive CFO = ambiguous, not clearly negative
 
 
 def normalize_position_52w(pos: Optional[float]) -> float:

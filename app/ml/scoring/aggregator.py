@@ -83,7 +83,7 @@ async def compute_full_score(symbol: str) -> dict:
                 "altman": { "z_score": float, "zone": str, "normalized": float, ... },
                 "valuation": { "graham_number": float|None, ..., "score": float },
                 "momentum": { "rsi_14": float|None, ..., "score": float },
-                "growth": { "revenue_cagr_pct": float|None, ..., "score": float },
+                "growth": { "revenue_growth_pct": float|None, ..., "score": float },
             },
             "data_quality": {
                 "piotroski_available": bool,

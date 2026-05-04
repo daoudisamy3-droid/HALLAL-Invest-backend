@@ -178,11 +178,11 @@ def _build_strengths(score: dict) -> list[str]:
         strengths.append(f"Zone de survente (RSI {rsi:.1f})")
 
     growth = sub.get("growth") or {}
-    rev_cagr = _safe(growth.get("revenue_cagr_pct"))
+    rev_cagr = _safe(growth.get("revenue_growth_pct"))
     if rev_cagr is not None and rev_cagr > 10:
         strengths.append(f"Croissance CA {rev_cagr:.1f}% YoY")
 
-    eps_cagr = _safe(growth.get("eps_cagr_pct"))
+    eps_cagr = _safe(growth.get("eps_growth_pct"))
     if eps_cagr is not None and eps_cagr > 10:
         strengths.append(f"Croissance EPS {eps_cagr:.1f}% YoY")
 
