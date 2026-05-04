@@ -76,19 +76,28 @@ def compute_valuation(data: dict) -> dict:
             (target_mean - current_price) / current_price * 100.0, 2
         )
 
-    # ── Component scores ──────────────────────────────────────────
-    mos_score = normalize_margin_of_safety(margin_of_safety_pct)
-    peg_score = normalize_peg(peg)
-    upside_score = _normalize_analyst_upside(analyst_upside_pct)
+    # ── Component scores (only include calculable components) ─────
+    components_val = []
 
-    # Weighted composite
     if margin_of_safety_pct is not None:
-        score = 0.40 * mos_score + 0.30 * peg_score + 0.30 * upside_score
-    elif peg is not None or analyst_upside_pct is not None:
-        # No Graham number → split weight between PEG and upside
-        score = 0.50 * peg_score + 0.50 * upside_score
-    else:
+        mos_score = normalize_margin_of_safety(margin_of_safety_pct)
+        components_val.append((mos_score, 0.40, "mos"))
+
+    if peg is not None and peg > 0:
+        peg_score = normalize_peg(peg)
+        components_val.append((peg_score, 0.30, "peg"))
+
+    if analyst_upside_pct is not None:
+        upside_score = _normalize_analyst_upside(analyst_upside_pct)
+        components_val.append((upside_score, 0.30, "upside"))
+
+    if not components_val:
         score = 50.0
+        val_available = False
+    else:
+        total_w = sum(w for _, w, _ in components_val)
+        score = sum(s * w for s, w, _ in components_val) / total_w
+        val_available = True
 
     return {
         "graham_number": graham_number,
@@ -96,5 +105,5 @@ def compute_valuation(data: dict) -> dict:
         "peg": peg,
         "analyst_upside_pct": analyst_upside_pct,
         "score": round(score, 1),
-        "available": available,
+        "available": val_available,
     }

@@ -77,14 +77,30 @@ def compute_altman(data: dict) -> dict:
     )
     x5: Optional[float] = revenue / total_assets if revenue is not None else None
 
-    # Use 0.0 for missing components (conservative)
-    z = (
-        1.2 * (x1 or 0.0)
-        + 1.4 * (x2 or 0.0)
-        + 3.3 * (x3 or 0.0)
-        + 0.6 * (x4 or 0.0)
-        + 1.0 * (x5 or 0.0)
-    )
+    # Require at least 3 of 5 components to produce a meaningful Z-Score
+    weights = {"x1": 1.2, "x2": 1.4, "x3": 3.3, "x4": 0.6, "x5": 1.0}
+    vals = {"x1": x1, "x2": x2, "x3": x3, "x4": x4, "x5": x5}
+    present = {k: v for k, v in vals.items() if v is not None}
+
+    if len(present) < 3:
+        return {
+            "z_score": None,
+            "zone": None,
+            "normalized": 50.0,
+            "components": {
+                "x1": round(x1, 4) if x1 is not None else None,
+                "x2": round(x2, 4) if x2 is not None else None,
+                "x3": round(x3, 4) if x3 is not None else None,
+                "x4": round(x4, 4) if x4 is not None else None,
+                "x5": round(x5, 4) if x5 is not None else None,
+            },
+            "available": False,
+        }
+
+    # Rescale weights to present components
+    w_total_full = sum(weights.values())  # 6.5
+    w_present = sum(weights[k] for k in present)
+    z = sum(weights[k] * v for k, v in present.items()) * w_total_full / w_present
 
     # Normalize Z → 0-100
     from app.ml.scoring.normalizer import normalize_altman

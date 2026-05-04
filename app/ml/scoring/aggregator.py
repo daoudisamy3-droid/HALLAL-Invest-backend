@@ -35,6 +35,22 @@ _WEIGHTS = {
     "momentum": 0.15,
     "growth": 0.20,
 }
+assert abs(sum(_WEIGHTS.values()) - 1.0) < 1e-9, (
+    f"_WEIGHTS must sum to 1.0, got {sum(_WEIGHTS.values()):.6f}"
+)
+
+
+def _safe_compute(name: str, fn, data: dict, symbol: str = "") -> dict:
+    try:
+        return fn(data)
+    except Exception as exc:
+        logger.exception("scoring/%s: %s failed: %s", symbol, name, exc)
+        return {
+            "score": 50.0,
+            "normalized": 50.0,
+            "available": False,
+            "error": str(exc),
+        }
 
 
 def _verdict(score: float, halal_compliant: bool) -> str:
@@ -102,25 +118,34 @@ async def compute_full_score(symbol: str) -> dict:
         }
 
     # ── Sub-scores ────────────────────────────────────────────────
-    piotroski = compute_piotroski(data)
-    altman = compute_altman(data)
-    valuation = compute_valuation(data)
-    momentum = compute_momentum(data)
-    growth = compute_growth(data)
+    piotroski = _safe_compute("piotroski", compute_piotroski, data, symbol)
+    altman    = _safe_compute("altman",    compute_altman,    data, symbol)
+    valuation = _safe_compute("valuation", compute_valuation, data, symbol)
+    momentum  = _safe_compute("momentum",  compute_momentum,  data, symbol)
+    growth    = _safe_compute("growth",    compute_growth,    data, symbol)
 
-    p_norm = piotroski["normalized"]
-    a_norm = altman["normalized"]
-    v_norm = valuation["score"]
-    m_norm = momentum["score"]
-    g_norm = growth["score"]
+    p_norm = piotroski.get("normalized", 50.0)
+    a_norm = altman.get("normalized", 50.0)
+    v_norm = valuation.get("score", 50.0)
+    m_norm = momentum.get("score", 50.0)
+    g_norm = growth.get("score", 50.0)
 
-    composite = (
-        _WEIGHTS["piotroski"] * p_norm
-        + _WEIGHTS["altman"] * a_norm
-        + _WEIGHTS["valuation"] * v_norm
-        + _WEIGHTS["momentum"] * m_norm
-        + _WEIGHTS["growth"] * g_norm
-    )
+    # Dynamic reweighting — exclude unavailable components
+    components = {
+        "piotroski": (p_norm, _WEIGHTS["piotroski"], piotroski.get("available", True)),
+        "altman":    (a_norm, _WEIGHTS["altman"],    altman.get("available", True)),
+        "valuation": (v_norm, _WEIGHTS["valuation"], valuation.get("available", True)),
+        "momentum":  (m_norm, _WEIGHTS["momentum"],  momentum.get("available", True)),
+        "growth":    (g_norm, _WEIGHTS["growth"],    growth.get("available", True)),
+    }
+    available_components = [(s, w) for s, w, avail in components.values() if avail]
+
+    if not available_components:
+        composite = 50.0
+    else:
+        total_w = sum(w for _, w in available_components)
+        composite = sum(s * w for s, w in available_components) / total_w
+
     composite = round(min(100.0, max(0.0, composite)), 1)
 
     verdict = _verdict(composite, halal["compliant"])
