@@ -149,6 +149,32 @@ async def compute_entry_plan(symbol: str, sector: str = "") -> dict:
         logger.warning("entry_engine/%s: insufficient data (%d rows)", symbol, len(df))
         return {"available": False}
 
+    # Reconcile Alpaca last close with YFinance live price
+    # to avoid stale-data scenarios on the IEX feed
+    from app.integration import yfinance_client
+    try:
+        yf_data = await yfinance_client.get_fast_price(symbol)
+        yf_price = yf_data.get("price") or yf_data.get("current_price")
+        if yf_price is not None:
+            yf_price = float(yf_price)
+            alpaca_last = float(df["close"].iloc[-1])
+            if alpaca_last > 0:
+                deviation = abs(yf_price / alpaca_last - 1.0)
+                if deviation > 0.03:
+                    logger.warning(
+                        "entry_engine/%s: Alpaca close %.2f vs YF %.2f "
+                        "(deviation %.1f%%) — using YF live price",
+                        symbol, alpaca_last, yf_price, deviation * 100,
+                    )
+                    df = df.copy()
+                    df.loc[df.index[-1], "close"] = yf_price
+    except Exception as exc:
+        logger.warning(
+            "entry_engine/%s: YF reconciliation failed: %s — "
+            "continuing with Alpaca data",
+            symbol, exc,
+        )
+
     # ── Base calculations ─────────────────────────────────────────
     closes = df["close"]
     current_price = round(float(closes.iloc[-1]), 4)
