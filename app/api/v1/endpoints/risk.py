@@ -114,7 +114,7 @@ async def risk_intelligence(symbol: str) -> dict:
     current_price: float = pred["current_price"]
     volatility_10d: float = pred["volatility_10d"] or 0.015  # safe default if zero
     pred_1d = pred.get("predictions", {}).get("1d", {})
-    confidence: float = pred_1d.get("confidence", 0.5)
+    confidence: float = pred_1d.get("confidence", 50.0)
     direction: str = pred_1d.get("direction", "UP")
 
     rsi: float | None = ticker.rsi_14.value if ticker else None
@@ -160,7 +160,7 @@ async def risk_intelligence(symbol: str) -> dict:
         kelly_label = f"{kelly * 100:.1f}% du capital"
 
     # ── Conviction score (0-100) ──────────────────────────────────
-    ml_score = confidence * 40
+    ml_score = (confidence / 100) * 40
     risk_score = (1 - risk_pct) * 30
 
     rsi_val = rsi if rsi is not None else 50.0

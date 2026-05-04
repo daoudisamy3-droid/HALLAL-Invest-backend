@@ -22,7 +22,7 @@ router = APIRouter()
     description=(
         "Returns the current price, 10-day volatility, and predicted price for J+1 "
         "using an XGBoost classifier trained on OHLCV + fundamental features. "
-        "Includes directional score (UP/DOWN) and confidence (0–1). Models are cached for 24h per symbol."
+        "Includes directional score (UP/DOWN) and confidence (0–100). Models are cached for 24h per symbol."
     ),
     dependencies=[Depends(rate_limit_dependency)],
 )
