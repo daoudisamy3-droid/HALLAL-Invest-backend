@@ -15,7 +15,6 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.api.v1.endpoints.ticker import get_ticker
 from app.core.cache import cache_get, cache_set
 from app.core.logging import logger
 from app.integration import yfinance_client
@@ -182,16 +181,9 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
     scaler = payload["scaler"]  # StandardScaler
     model_age = time.time() - cache_entry["trained_at"]
 
-    # ── Step 3: Fetch fundamentals (silent fallback) ──────────────
-    try:
-        ticker_data = await get_ticker(symbol)
-        fundamentals = ticker_data.model_dump()
-    except Exception:
-        fundamentals = None
-
-    # ── Step 4: Build features with fundamentals ──────────────────
-    df_raw = await fetch_ohlcv(symbol, limit=100)
-    df_feat = build_features(df_raw, fundamentals=fundamentals)
+    # ── Step 3: Build features ────────────────────────────────────
+    df_raw = await fetch_ohlcv(symbol, limit=300)
+    df_feat = build_features(df_raw, symbol=symbol)
     volatility_10d = round(float(df_feat["volatility_10d"].iloc[-1]), 6)
 
     # Use YFinance as the authoritative current price (matches frontend header)
@@ -209,24 +201,15 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
     last_row = df_feat[FEATURE_COLUMNS].iloc[[-1]]
     last_row_scaled = scaler.transform(last_row)
 
-    # Probability of UP (class 1)
+    # ── Step 6: Direction + confidence (proba of UP, scaled 0-100) ─
     proba = float(model.predict_proba(last_row_scaled)[0][1])
-    direction = "UP" if proba >= 0.5 else "DOWN"
-
-    # ── Step 6: Confidence-adjusted price target ──────────────────
-    # Apply historical median return weighted by model confidence
-    median_return = float(df_feat["return_1d"].median())
-    signed_return = median_return if direction == "UP" else -abs(median_return)
-    confidence_adjusted = signed_return * proba
-    predicted_price = round(current_price * (1 + confidence_adjusted), 2)
-    pct = round(confidence_adjusted * 100, 3)
+    confidence = float(proba * 100)
+    direction = "UP" if confidence > 50 else "DOWN"
 
     predictions = {
         "1d": {
-            "price": predicted_price,
-            "pct": pct,
             "direction": direction,
-            "confidence": round(proba, 4),
+            "confidence": round(confidence, 2),
         }
     }
 
@@ -241,8 +224,6 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
             {
                 "direction": pred_1d["direction"],
                 "price_at_prediction": current_price,
-                "predicted_price": pred_1d["price"],
-                "pct": pred_1d["pct"],
                 "confidence": pred_1d["confidence"],
                 "verified": False,
                 "actual_close": None,
@@ -251,13 +232,13 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
             ttl=_PRED_TTL,
         )
         logger.info(
-            "Stored today's prediction for %s: direction=%s confidence=%.3f price_ref=%.2f",
-            symbol, pred_1d["direction"], proba, current_price,
+            "Stored today's prediction for %s: direction=%s confidence=%.1f price_ref=%.2f",
+            symbol, pred_1d["direction"], confidence, current_price,
         )
 
     logger.info(
-        "Prediction for %s: price=%.2f J+1=%.2f direction=%s confidence=%.3f",
-        symbol, current_price, pred_1d["price"], pred_1d["direction"], proba,
+        "Prediction for %s: price=%.2f direction=%s confidence=%.1f",
+        symbol, current_price, pred_1d["direction"], confidence,
     )
 
     return {

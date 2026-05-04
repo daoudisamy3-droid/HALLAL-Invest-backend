@@ -1,23 +1,23 @@
 """
-Feature Engineering — Technical indicators + optional fundamental data.
+Feature Engineering — Technical indicators + fundamental data via YFinance.
 
 Input:  DataFrame with columns [timestamp, open, high, low, close, volume]
-        + optional `fundamentals` dict from /api/v1/ticker/{symbol}
+        + optional symbol string for live YFinance fundamental fetch.
 Output: DataFrame with original columns + engineered features, NaN rows dropped.
 
-Technical features (always computed):
+Technical features (always computed from OHLCV):
   - close, volume          (raw)
   - return_1d              daily percentage return
   - volatility_10d         rolling 10-day std of return_1d
   - ma_5, ma_10, ma_20     simple moving averages of close
-
-Fundamental features (require `fundamentals` dict; default 0.0 otherwise):
   - rsi_14                 14-day Relative Strength Index
+  - pos_vs_52w_high        close / rolling 252-day max
+  - pos_vs_ma200           close / rolling 200-day mean
+
+Fundamental features (from YFinance info when symbol provided; 0.0 otherwise):
   - trailing_pe            trailing price-to-earnings ratio
   - profit_margins         net profit margin
   - return_on_equity       return on equity
-  - price_vs_52w_high      close / 52-week high  (range position)
-  - price_vs_200ma         close / 200-day moving average
 """
 
 from typing import Optional
@@ -40,40 +40,37 @@ FEATURE_COLUMNS = [
     "trailing_pe",
     "profit_margins",
     "return_on_equity",
-    "price_vs_52w_high",
-    "price_vs_200ma",
+    "pos_vs_52w_high",
+    "pos_vs_ma200",
 ]
 
-_FUNDAMENTAL_COLS = [
-    "rsi_14",
-    "trailing_pe",
-    "profit_margins",
-    "return_on_equity",
-    "price_vs_52w_high",
-    "price_vs_200ma",
-]
+
+def _compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    return 100 - (100 / (1 + rs))
 
 
 def build_features(
     df: pd.DataFrame,
-    fundamentals: Optional[dict] = None,
+    symbol: Optional[str] = None,
+    fundamentals: Optional[dict] = None,  # kept for backwards compat, ignored when symbol given
 ) -> pd.DataFrame:
     """
-    Add technical and (optionally) fundamental feature columns to the DataFrame.
+    Add technical and fundamental feature columns to the DataFrame.
 
     Args:
         df:           DataFrame with at least [close, volume] columns.
-        fundamentals: Dict from /api/v1/ticker/{symbol} response.
-                      Each key maps to {"value": float|None, ...}.
-                      When None, fundamental columns are filled with 0.0
-                      so the feature matrix shape stays consistent.
+        symbol:       Ticker symbol. When provided, fetches trailing_pe,
+                      profit_margins, return_on_equity from YFinance info.
+        fundamentals: Deprecated — ignored when symbol is provided.
 
     Returns:
         New DataFrame with all FEATURE_COLUMNS added and NaN rows dropped.
-        The original DataFrame is not mutated.
-
-    Raises:
-        ValueError: If required columns are missing or data is too short.
     """
     required = {"close", "volume"}
     missing = required - set(df.columns)
@@ -88,10 +85,10 @@ def build_features(
 
     out = df.copy()
 
-    # ── Daily return (percentage change) ──────────────────────────
+    # ── Daily return ──────────────────────────────────────────────
     out["return_1d"] = out["close"].pct_change()
 
-    # ── Rolling volatility (std of daily returns, 10-day window) ──
+    # ── Rolling volatility ────────────────────────────────────────
     out["volatility_10d"] = out["return_1d"].rolling(window=10).std()
 
     # ── Simple Moving Averages ────────────────────────────────────
@@ -99,44 +96,47 @@ def build_features(
     out["ma_10"] = out["close"].rolling(window=10).mean()
     out["ma_20"] = out["close"].rolling(window=20).mean()
 
-    # ── Fundamental features ──────────────────────────────────────
-    if fundamentals is not None:
-        # price_vs_52w_high : position in the annual range (close / 52w high)
-        high_52w = fundamentals.get("fifty_two_week_high", {}).get("value")
-        if high_52w and high_52w > 0:
-            out["price_vs_52w_high"] = out["close"] / high_52w
-        else:
-            out["price_vs_52w_high"] = 1.0
+    # ── RSI 14 (OHLCV-based time series) ─────────────────────────
+    if "rsi_14" not in out.columns:
+        out["rsi_14"] = _compute_rsi(out["close"], period=14)
 
-        # price_vs_200ma : distance from long-term moving average
-        ma_200 = fundamentals.get("two_hundred_day_average", {}).get("value")
-        if ma_200 and ma_200 > 0:
-            out["price_vs_200ma"] = out["close"] / ma_200
-        else:
-            out["price_vs_200ma"] = 1.0
+    # ── Position vs 52-week high (rolling 252-day max) ────────────
+    out["pos_vs_52w_high"] = out["close"] / out["close"].rolling(252).max()
 
-        # Scalar fundamentals broadcast across all rows
-        for col, key in [
-            ("rsi_14",           "rsi_14"),
-            ("trailing_pe",      "trailing_pe"),
-            ("profit_margins",   "profit_margins"),
-            ("return_on_equity", "return_on_equity"),
-        ]:
-            val = fundamentals.get(key, {}).get("value")
-            out[col] = float(val) if val is not None else 0.0
-    else:
-        for col in _FUNDAMENTAL_COLS:
-            out[col] = 0.0
+    # ── Position vs MA200 (rolling 200-day mean) ──────────────────
+    out["pos_vs_ma200"] = out["close"] / out["close"].rolling(200).mean()
 
-    # ── Drop rows with NaN across all feature columns ─────────────
+    # ── Scalar fundamentals ───────────────────────────────────────
+    trailing_pe = 0.0
+    profit_margins = 0.0
+    return_on_equity = 0.0
+
+    if symbol:
+        try:
+            import yfinance as yf
+            info = yf.Ticker(symbol).info or {}
+            trailing_pe = float(info.get("trailingPE") or 0)
+            profit_margins = float(info.get("profitMargins") or 0)
+            return_on_equity = float(info.get("returnOnEquity") or 0)
+            logger.info(
+                "features/%s: pe=%.2f margins=%.4f roe=%.4f",
+                symbol, trailing_pe, profit_margins, return_on_equity,
+            )
+        except Exception as exc:
+            logger.warning("features/%s: yfinance info failed: %s", symbol, exc)
+
+    out["trailing_pe"] = trailing_pe
+    out["profit_margins"] = profit_margins
+    out["return_on_equity"] = return_on_equity
+
+    # ── Drop NaN rows ─────────────────────────────────────────────
     rows_before = len(out)
     out = out.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
     rows_after = len(out)
 
-    fundamental_mode = "with fundamentals" if fundamentals is not None else "fundamentals=None (zeros)"
     logger.info(
-        "Features built (%s): %d → %d rows (%d dropped due to NaN)",
-        fundamental_mode, rows_before, rows_after, rows_before - rows_after,
+        "Features built (symbol=%s): %d → %d rows (%d dropped due to NaN)",
+        symbol or "None", rows_before, rows_after, rows_before - rows_after,
     )
 
     return out

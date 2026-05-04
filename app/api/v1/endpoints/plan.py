@@ -300,7 +300,7 @@ async def get_plan(symbol: str) -> dict:
 
     pred_1d = (pred.get("predictions") or {}).get("1d", {})
     pred_direction = pred_1d.get("direction", "N/A")
-    pred_confidence = _safe(pred_1d.get("confidence"), 0.5)
+    pred_confidence = _safe(pred_1d.get("confidence"), 50.0)
 
     rr_ratio = _safe(risk.get("rr_ratio"), 0.0)
     stop_loss = _safe(risk.get("stop_loss"))
@@ -328,7 +328,7 @@ async def get_plan(symbol: str) -> dict:
     # ── Compute derived scores ─────────────────────────────────────
     rr_norm = _rr_normalized(rr_ratio)
     timing = _timing_score(days_to_earnings, rsi, ma200_ratio)
-    conf_score = pred_confidence * 100.0
+    conf_score = pred_confidence  # already 0-100
     context_score = _safe((market_ctx or {}).get("context_score"), 50.0)
 
     signal_global = _clamp(
@@ -397,7 +397,7 @@ async def get_plan(symbol: str) -> dict:
         "sub_signals": {
             "score_verdict": score.get("verdict", "N/A"),
             "prediction_direction": pred_direction,
-            "prediction_confidence": round(pred_confidence, 4),
+            "prediction_confidence": round(pred_confidence, 1),
             "rsi": round(rsi, 1) if rsi is not None else None,
             "ma200_signal": ma200_signal,
             "days_to_earnings": days_to_earnings,

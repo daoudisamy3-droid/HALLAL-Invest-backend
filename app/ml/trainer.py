@@ -84,7 +84,7 @@ async def train_models(symbol: str) -> dict[str, Any]:
     logger.info("Raw data: %d rows", len(df_raw))
 
     # ── Step 2: Feature engineering ───────────────────────────────
-    df_feat = build_features(df_raw)
+    df_feat = build_features(df_raw, symbol=symbol)
     logger.info("After features: %d rows", len(df_feat))
 
     # ── Step 3: Target construction ───────────────────────────────
@@ -103,7 +103,7 @@ async def train_models(symbol: str) -> dict[str, Any]:
     X_scaled = scaler.fit_transform(X)
 
     # ── Step 6: TimeSeriesSplit cross-validation ──────────────────
-    tscv = TimeSeriesSplit(n_splits=_N_SPLITS)
+    tscv = TimeSeriesSplit(n_splits=_N_SPLITS, gap=5)
     fold_accuracies: list[float] = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(X_scaled)):
