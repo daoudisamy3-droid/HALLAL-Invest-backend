@@ -44,8 +44,8 @@ def create_app() -> FastAPI:
     fmp_key = settings.fmp_api_key or os.getenv("FMP_API_KEY", "")
     logger.info(
         "API KEYS CHECK: GEMINI_API_KEY=%s, FMP_API_KEY=%s",
-        ("DETECTED (" + gemini_key[:8] + "...)" if gemini_key else "MISSING"),
-        ("DETECTED (" + fmp_key[:8] + "...)" if fmp_key else "MISSING"),
+        ("DETECTED" if gemini_key else "MISSING"),
+        ("DETECTED" if fmp_key else "MISSING"),
     )
 
     logger.info(
