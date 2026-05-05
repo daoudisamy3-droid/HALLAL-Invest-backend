@@ -248,7 +248,7 @@ def _build_entry_conditions(
 )
 async def get_plan(symbol: str) -> dict:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     cached = cache_get(_PLAN_NS, symbol)

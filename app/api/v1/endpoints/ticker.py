@@ -119,7 +119,7 @@ def _extract_domain(url: Optional[str]) -> Optional[str]:
 )
 async def get_ticker_price(symbol: str) -> PriceResponse:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     try:
@@ -147,7 +147,7 @@ async def get_ticker_price(symbol: str) -> PriceResponse:
 )
 async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     cached = cache_get(_TICKER_CACHE_NS, f"audit:{symbol}")
@@ -183,7 +183,7 @@ async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
 )
 async def get_strategic_analysis(symbol: str) -> StrategicAnalysis:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     cached = cache_get(_TICKER_CACHE_NS, f"strategic:{symbol}")
@@ -225,7 +225,7 @@ async def get_strategic_analysis(symbol: str) -> StrategicAnalysis:
 )
 async def get_analyst_sentiment(symbol: str) -> AnalystSentiment:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     try:
@@ -290,7 +290,7 @@ async def get_analyst_sentiment(symbol: str) -> AnalystSentiment:
 )
 async def get_ticker(symbol: str) -> DataGeneral:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     # ── Parallel fetch: info + 5y history ─────────────────────────
@@ -381,7 +381,7 @@ async def get_ticker_ohlcv(
     timeframe: str = "1Day",
 ) -> dict:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     cache_key = f"{symbol}:{limit}:{timeframe}"
@@ -468,7 +468,7 @@ def _make_initials(name: str) -> str:
 )
 async def get_ticker_management(symbol: str) -> dict:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     cached = cache_get(_MGMT_CACHE_NS, symbol)
