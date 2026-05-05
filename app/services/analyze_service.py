@@ -242,7 +242,6 @@ def _fetch_risk_blocking(symbol: str) -> dict[str, Any]:
         # Top-level safety net: yfinance / network / parsing / anything.
         # We log loudly and return the all-null fallback so the frontend
         # can still render the scorecard at zero.
-        print(f"Erreur fetch {symbol}: {e}")
         logger.error("risk-core: fatal fetch error for %s: %s", symbol, e)
         return _empty_payload()
 
