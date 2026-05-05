@@ -70,7 +70,7 @@ async def _fmp_get(path: str, params: Optional[dict] = None) -> Any:
         return None
 
     if resp.status_code == 401:
-        logger.error("FMP 401 on %s — invalid API key: %s", path, key_preview)
+        logger.error("FMP 401 on %s — invalid API key", path)
         return None
 
     if resp.status_code != 200:
