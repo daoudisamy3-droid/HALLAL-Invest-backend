@@ -37,7 +37,7 @@ async def predict(symbol: str) -> dict:
         logger.error("Prediction failed for %s: %s", symbol, exc)
         raise HTTPException(
             status_code=502,
-            detail=f"Prediction failed for '{symbol}': {exc}",
+            detail=f"Prediction failed for '{symbol}'. Please retry later.",
         )
 
     return result
@@ -68,7 +68,7 @@ async def metrics(symbol: str) -> dict:
             logger.error("Metrics fetch failed for %s: %s", symbol, exc)
             raise HTTPException(
                 status_code=502,
-                detail=f"Could not train models for '{symbol}': {exc}",
+                detail=f"Could not train models for '{symbol}'. Please retry later.",
             )
 
     payload = entry["payload"]

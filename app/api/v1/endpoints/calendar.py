@@ -55,7 +55,7 @@ async def calendar(symbol: str) -> dict:
         logger.error("calendar/%s: fetch failed: %s", symbol, exc)
         raise HTTPException(
             status_code=502,
-            detail=f"Could not fetch calendar data for '{symbol}': {exc}",
+            detail=f"Could not fetch calendar data for '{symbol}'. Please retry later.",
         )
 
     # ── Earnings next date(s) ─────────────────────────────────────

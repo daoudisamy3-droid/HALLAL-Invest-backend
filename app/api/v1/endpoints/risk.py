@@ -101,7 +101,7 @@ async def risk_intelligence(symbol: str) -> dict:
         logger.error("risk/%s: prediction fetch failed: %s", symbol, exc)
         raise HTTPException(
             status_code=502,
-            detail=f"Could not compute risk block for '{symbol}': {exc}",
+            detail=f"Could not compute risk block for '{symbol}'. Please retry later.",
         )
 
     try:

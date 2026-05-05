@@ -318,7 +318,7 @@ async def corporate_rels(symbol: str) -> dict:
         logger.error("rels/%s: ticker info failed: %s", symbol, exc)
         raise HTTPException(
             status_code=502,
-            detail=f"Could not fetch ticker data for '{symbol}': {exc}",
+            detail=f"Could not fetch ticker data for '{symbol}'. Please retry later.",
         )
 
     legal_name: str | None = info.get("longName") or info.get("shortName")

@@ -162,7 +162,7 @@ async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
         logger.error("AAOIFI audit failed for %s: %s", symbol, exc)
         raise HTTPException(
             status_code=502,
-            detail=f"AAOIFI audit failed for '{symbol}': {exc}",
+            detail=f"AAOIFI audit failed for '{symbol}'. Please retry later.",
         )
 
     cache_set(_TICKER_CACHE_NS, f"audit:{symbol}", result.model_dump(), ttl=_TICKER_CACHE_TTL)
@@ -396,7 +396,7 @@ async def get_ticker_ohlcv(
         logger.error("ohlcv/%s: fetch failed: %s", symbol, exc)
         raise HTTPException(
             status_code=502,
-            detail=f"Could not fetch OHLCV data for '{symbol}': {exc}",
+            detail=f"Could not fetch OHLCV data for '{symbol}'. Please retry later.",
         )
 
     bars = [
@@ -482,7 +482,7 @@ async def get_ticker_management(symbol: str) -> dict:
         logger.error("management/%s: fetch failed: %s", symbol, exc)
         raise HTTPException(
             status_code=502,
-            detail=f"Could not fetch management data for '{symbol}': {exc}",
+            detail=f"Could not fetch management data for '{symbol}'. Please retry later.",
         )
 
     officers_raw: list[dict] = info.get("companyOfficers") or []
