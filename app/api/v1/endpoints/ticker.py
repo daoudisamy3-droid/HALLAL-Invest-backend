@@ -118,7 +118,7 @@ def _extract_domain(url: Optional[str]) -> Optional[str]:
 )
 async def get_ticker_price(symbol: str) -> PriceResponse:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     try:
@@ -146,7 +146,7 @@ async def get_ticker_price(symbol: str) -> PriceResponse:
 )
 async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     cached = cache_get(_TICKER_CACHE_NS, f"audit:{symbol}")
@@ -158,10 +158,10 @@ async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
     try:
         result = await run_aaoifi_audit(symbol)
     except Exception as exc:
-        logger.error("AAOIFI audit failed for %s: %s", symbol, exc)
+        logger.exception("AAOIFI audit failed for %s", symbol)
         raise HTTPException(
             status_code=502,
-            detail=f"AAOIFI audit failed for '{symbol}': {exc}",
+            detail="External data source unavailable. Please retry later.",
         )
 
     cache_set(_TICKER_CACHE_NS, f"audit:{symbol}", result.model_dump(), ttl=_TICKER_CACHE_TTL)
@@ -182,7 +182,7 @@ async def get_aaoifi_audit(symbol: str) -> AAOIFIAudit:
 )
 async def get_strategic_analysis(symbol: str) -> StrategicAnalysis:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     cached = cache_get(_TICKER_CACHE_NS, f"strategic:{symbol}")
@@ -224,7 +224,7 @@ async def get_strategic_analysis(symbol: str) -> StrategicAnalysis:
 )
 async def get_analyst_sentiment(symbol: str) -> AnalystSentiment:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     try:
@@ -289,7 +289,7 @@ async def get_analyst_sentiment(symbol: str) -> AnalystSentiment:
 )
 async def get_ticker(symbol: str) -> DataGeneral:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     # ── Parallel fetch: info + 5y history ─────────────────────────
@@ -358,3 +358,43 @@ async def get_ticker(symbol: str) -> DataGeneral:
         rsi_14=_metric(rsi, _fmt_num(rsi), "calc/yfinance"),
         max_drawdown_5y=_metric(max_dd, f"{max_dd}%" if max_dd is not None else "N/A", "calc/yfinance"),
     )
+
+
+@router.get(
+    "/holders/{symbol}",
+    summary="Insider & institutional holders (stub)",
+    description="TODO: implement real holders data from FMP or yfinance.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def get_holders(symbol: str) -> dict:
+    symbol = symbol.upper().strip()
+    if not symbol.replace(".", "").replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+    logger.warning("TODO: implement /holders/%s", symbol)
+    return {
+        "symbol": symbol,
+        "available": False,
+        "message": "endpoint stub",
+        "insider_transactions": [],
+        "institutional_holders": [],
+        "fund_holders": [],
+    }
+
+
+@router.get(
+    "/plan/{symbol}",
+    summary="Entry plan & target zones (stub)",
+    description="TODO: implement real entry plan logic.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def get_plan(symbol: str) -> dict:
+    symbol = symbol.upper().strip()
+    if not symbol.replace(".", "").replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol")
+    logger.warning("TODO: implement /plan/%s", symbol)
+    return {
+        "symbol": symbol,
+        "available": False,
+        "message": "endpoint stub",
+        "entry_plan": {"available": False},
+    }

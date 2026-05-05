@@ -159,3 +159,21 @@ async def chokepoints_proxys():
 )
 async def macro_status():
     return await get_macro_status()
+
+
+@router.get(
+    "/macro/dashboard",
+    summary="Macro dashboard aggregated snapshot (stub)",
+    description="TODO: implement full macro dashboard aggregation.",
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def macro_dashboard():
+    from app.core.logging import logger
+    logger.warning("TODO: implement /macro/dashboard")
+    return {
+        "available": False,
+        "message": "endpoint stub",
+        "indices": [],
+        "fx": [],
+        "commodities": [],
+    }

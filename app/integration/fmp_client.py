@@ -44,14 +44,12 @@ async def _fmp_get(path: str, params: Optional[dict] = None) -> Any:
         logger.error("FMP_API_KEY is empty — set it in Railway env vars or .env file")
         return None
 
-    key_preview = key[:8] + "..." + key[-4:] if len(key) > 12 else "***"
-
     req_params = {"apikey": key}
     if params:
         req_params.update(params)
 
     url = f"{FMP_BASE}/{path}"
-    log_params = {k: (v if k != "apikey" else key_preview) for k, v in req_params.items()}
+    log_params = {k: (v if k != "apikey" else "***") for k, v in req_params.items()}
     logger.info("FMP REQUEST: GET %s params=%s", url, log_params)
 
     try:

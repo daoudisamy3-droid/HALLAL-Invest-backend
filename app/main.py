@@ -18,11 +18,10 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # CORS – fixed list for localhost + regex for any Railway deployment
+    # CORS – fixed list for localhost + production only
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
-        allow_origin_regex=r"https://.*\.up\.railway\.app",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -39,13 +38,11 @@ def create_app() -> FastAPI:
         return {"status": "ok", "version": settings.app_version}
 
     # ── API key detection at startup ─────────────────────────────
-    import os
-    gemini_key = settings.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
-    fmp_key = settings.fmp_api_key or os.getenv("FMP_API_KEY", "")
     logger.info(
-        "API KEYS CHECK: GEMINI_API_KEY=%s, FMP_API_KEY=%s",
-        ("DETECTED (" + gemini_key[:8] + "...)" if gemini_key else "MISSING"),
-        ("DETECTED (" + fmp_key[:8] + "...)" if fmp_key else "MISSING"),
+        "API KEYS CHECK: GEMINI_API_KEY=%s, FMP_API_KEY=%s, ALPACA_API_KEY=%s",
+        "DETECTED" if settings.gemini_api_key else "MISSING",
+        "DETECTED" if settings.fmp_api_key else "MISSING",
+        "DETECTED" if settings.alpaca_api_key else "MISSING",
     )
 
     logger.info(

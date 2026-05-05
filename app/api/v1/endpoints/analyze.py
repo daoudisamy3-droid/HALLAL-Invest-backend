@@ -59,7 +59,6 @@ async def analyze_risk(ticker: str) -> RiskScorecardResponse:
         data = await get_risk_scorecard(ticker)
         return RiskScorecardResponse(**data)
     except Exception as e:
-        print(f"Erreur fetch {ticker}: {e}")
         logger.error("risk route: fatal error for %s: %s", ticker, e)
         return RiskScorecardResponse(**_empty_scorecard(ticker))
 
@@ -93,7 +92,6 @@ async def analyze_compare_chart(
         data = await get_compare_chart(t1, t2)
         return CompareChartResponse(**data)
     except Exception as e:
-        print(f"Erreur compare {t1} vs {t2}: {e}")
         logger.error("compare_chart: fatal error for %s vs %s: %s", t1, t2, e)
         return CompareChartResponse(
             ticker1={"symbol": t1, "name": None, "series": []},
@@ -121,6 +119,5 @@ async def analyze_peers(ticker: str) -> SmartPeersResponse:
         data = await get_smart_peers(ticker)
         return SmartPeersResponse(**data)
     except Exception as e:
-        print(f"Erreur peers {ticker}: {e}")
         logger.error("peers route: fatal error for %s: %s", ticker, e)
         return SmartPeersResponse(ticker=ticker)

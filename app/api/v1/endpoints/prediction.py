@@ -28,7 +28,7 @@ router = APIRouter()
 )
 async def predict(symbol: str) -> dict:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     try:
@@ -37,7 +37,7 @@ async def predict(symbol: str) -> dict:
         logger.error("Prediction failed for %s: %s", symbol, exc)
         raise HTTPException(
             status_code=502,
-            detail=f"Prediction failed for '{symbol}': {exc}",
+            detail="Prediction service unavailable. Please retry later.",
         )
 
     return result
@@ -55,7 +55,7 @@ async def predict(symbol: str) -> dict:
 )
 async def metrics(symbol: str) -> dict:
     symbol = symbol.upper().strip()
-    if not symbol.isalnum() and "." not in symbol and "-" not in symbol:
+    if not symbol.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker symbol")
 
     entry = _model_cache.get(symbol)
@@ -68,7 +68,7 @@ async def metrics(symbol: str) -> dict:
             logger.error("Metrics fetch failed for %s: %s", symbol, exc)
             raise HTTPException(
                 status_code=502,
-                detail=f"Could not train models for '{symbol}': {exc}",
+                detail="Prediction service unavailable. Please retry later.",
             )
 
     payload = entry["payload"]
