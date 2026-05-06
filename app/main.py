@@ -18,10 +18,13 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # CORS – fixed list (localhost dev + production frontend domain only)
+    # CORS – fixed list (localhost dev + production frontend domain)
+    # + regex scoped to Hallal-Invest Railway deployments (production,
+    # staging, preview) — NOT a wildcard *.up.railway.app.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
+        allow_origin_regex=r"https://hallal-invest-frontend(-[\w-]+)?\.up\.railway\.app",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
