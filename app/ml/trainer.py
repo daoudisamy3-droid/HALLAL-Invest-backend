@@ -49,7 +49,7 @@ async def train_models(symbol: str) -> dict[str, Any]:
 
     Steps:
         1. Fetch ~1000 daily bars from Alpaca
-        2. Compute technical features (13 columns)
+        2. Compute technical features (10 columns)
         3. Build forward-looking target (1d return)
         4. Binarize: 1 = UP (return > 0), 0 = DOWN / flat
         5. StandardScaler fit on full X
@@ -84,7 +84,7 @@ async def train_models(symbol: str) -> dict[str, Any]:
     logger.info("Raw data: %d rows", len(df_raw))
 
     # ── Step 2: Feature engineering ───────────────────────────────
-    df_feat = build_features(df_raw, symbol=symbol)
+    df_feat = build_features(df_raw)
     logger.info("After features: %d rows", len(df_feat))
 
     # ── Step 3: Target construction ───────────────────────────────
