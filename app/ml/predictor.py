@@ -186,7 +186,11 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
     df_feat = build_features(df_raw)
     volatility_10d = round(float(df_feat["volatility_10d"].iloc[-1]), 6)
 
-    # Use YFinance as the authoritative current price (matches frontend header)
+    # base_close = last Alpaca bar close (same source as training data).
+    # Used as price_at_prediction for verification to keep comparison consistent.
+    base_close = float(df_feat["close"].iloc[-1])
+
+    # current_price = YFinance live price for display (matches frontend header).
     try:
         yf_data = await yfinance_client.get_fast_price(symbol)
         current_price = float(yf_data.get("price") or yf_data.get("current_price"))
@@ -195,7 +199,7 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
             "YFinance price unavailable for %s (%s), falling back to Alpaca last close",
             symbol, exc,
         )
-        current_price = float(df_feat["close"].iloc[-1])
+        current_price = base_close
 
     # ── Step 5: Scale and infer ───────────────────────────────────
     last_row = df_feat[FEATURE_COLUMNS].iloc[[-1]]
@@ -223,7 +227,7 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
             f"{symbol}:{today}",
             {
                 "direction": pred_1d["direction"],
-                "price_at_prediction": current_price,
+                "price_at_prediction": base_close,
                 "confidence": pred_1d["confidence"],
                 "verified": False,
                 "actual_close": None,
@@ -232,8 +236,9 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
             ttl=_PRED_TTL,
         )
         logger.info(
-            "Stored today's prediction for %s: direction=%s confidence=%.1f price_ref=%.2f",
-            symbol, pred_1d["direction"], confidence, current_price,
+            "Stored today's prediction for %s: direction=%s confidence=%.1f "
+            "base_close=%.2f display_price=%.2f",
+            symbol, pred_1d["direction"], confidence, base_close, current_price,
         )
 
     logger.info(
@@ -244,6 +249,7 @@ async def get_prediction(symbol: str) -> dict[str, Any]:
     return {
         "symbol": symbol,
         "current_price": current_price,
+        "base_close": base_close,
         "volatility_10d": volatility_10d,
         "predictions": predictions,
         "model_age_seconds": round(model_age, 1),
