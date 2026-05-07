@@ -6,9 +6,9 @@ Route:
 
 Fetches in parallel:
   - compute_full_score()    → Piotroski, Altman, valuation, momentum, growth
-  - risk_intelligence()     → stop/TP, R/R ratio, RSI, conviction
+  - compute_risk()          → stop/TP, R/R ratio, RSI, conviction
   - get_prediction()        → ML direction + confidence
-  - calendar()              → earnings dates, dividend
+  - compute_calendar()      → earnings dates, dividend
   - compute_entry_plan()    → OHLCV-based Fibonacci, supports, DCA levels
   - fetch_market_context()  → macro (FRED) + sector (ETF/commodity)
 
@@ -256,18 +256,17 @@ async def get_plan(symbol: str) -> dict:
         logger.info("plan/%s: cache hit", symbol)
         return cached
 
-    # ── Import endpoint functions (safe: no Depends in signatures) ─
-    from app.api.v1.endpoints.risk import risk_intelligence
-    from app.api.v1.endpoints.calendar import calendar
     from app.ml.scoring.entry_engine import compute_entry_plan
     from app.ml.scoring.market_context import fetch_market_context
+    from app.services.calendar_service import compute_calendar
+    from app.services.risk_service import compute_risk
 
     # ── Parallel fetch of all signals ─────────────────────────────
     results = await asyncio.gather(
         compute_full_score(symbol),
-        risk_intelligence(symbol),
+        compute_risk(symbol),
         get_prediction(symbol),
-        calendar(symbol),
+        compute_calendar(symbol),
         compute_entry_plan(symbol),
         return_exceptions=True,
     )
