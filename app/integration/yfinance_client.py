@@ -144,8 +144,7 @@ async def get_interest_income_fallback(symbol: str) -> Optional[float]:
     # Attempt 1: standard income statement
     stmt = await loop.run_in_executor(_executor, _fetch_income_stmt, symbol)
     if stmt:
-        for key in ("Interest Income", "Interest Expense", "Interest Income Non Operating",
-                     "Interest Expense Non Operating"):
+        for key in ("Interest Income", "Interest Income Non Operating"):
             val = stmt.get(key)
             if val is not None:
                 try:

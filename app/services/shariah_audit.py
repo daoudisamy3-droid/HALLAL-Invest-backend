@@ -266,12 +266,8 @@ def _extract_interest_income(stmt: dict, source: str) -> Optional[float]:
     """
     if source == "FMP":
         val = _safe(stmt.get("interestIncome"))
-        if val is None:
-            val = _safe(stmt.get("interestExpense"))
     else:
         val = _safe(stmt.get("Interest Income"))
-        if val is None:
-            val = _safe(stmt.get("Interest Expense"))
 
     if val is None:
         logger.warning("Interest income field NOT FOUND in %s statement", source)
