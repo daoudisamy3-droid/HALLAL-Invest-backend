@@ -53,8 +53,8 @@ def _safe_compute(name: str, fn, data: dict, symbol: str = "") -> dict:
         }
 
 
-def _verdict(score: float, halal_compliant: bool) -> str:
-    if not halal_compliant:
+def _verdict(score: float, halal_compliant: Optional[bool]) -> str:
+    if halal_compliant is False:
         return "NON CONFORME"
     if score >= 76:
         return "FORT SIGNAL"
@@ -100,7 +100,7 @@ async def compute_full_score(symbol: str) -> dict:
     # ── Halal gate ────────────────────────────────────────────────
     halal = compute_halal_gate(data)
 
-    if not halal["compliant"]:
+    if halal["compliant"] is False:
         logger.info("scoring/%s: halal gate FAILED — %s", symbol, halal["reason"])
         return {
             "symbol": symbol,
