@@ -166,10 +166,7 @@ async def fetch_scoring_data(symbol: str) -> dict:
     net_income_prev = _is("netIncome", "Net Income", prev=True)
     gross_profit = _is("grossProfit", "Gross Profit")
     gross_profit_prev = _is("grossProfit", "Gross Profit", prev=True)
-    ebit = (
-        _is("operatingIncome", "Operating Income")
-        or _safe_pd(fmp_is_cur.get("ebitda"))
-    )
+    ebit = _is("operatingIncome", "Operating Income")
     eps = _safe_pd(fmp_is_cur.get("eps")) or _safe_pd(yf_info.get("trailingEps"))
     eps_prev = _safe_pd(fmp_is_prev.get("eps"))
 
