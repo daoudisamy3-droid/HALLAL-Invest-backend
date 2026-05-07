@@ -41,13 +41,13 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
 def compute_fibonacci_levels(df: pd.DataFrame) -> dict:
     """
     Fibonacci retracements from the 52-week range (up to 252 candles).
-    swing_high/swing_low based on close prices.
+    swing_high/swing_low use actual intraday high/low, not close.
     """
     window = min(252, len(df))
-    subset = df["close"].tail(window)
+    subset = df.tail(window)
 
-    swing_high = float(subset.max())
-    swing_low = float(subset.min())
+    swing_high = float(subset["high"].max())
+    swing_low = float(subset["low"].min())
     diff = swing_high - swing_low
 
     def _fib(ratio: float) -> float:
