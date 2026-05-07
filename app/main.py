@@ -40,6 +40,15 @@ def create_app() -> FastAPI:
     async def health_check():
         return {"status": "ok", "version": settings.app_version}
 
+    @app.on_event("startup")
+    async def _check_redis():
+        from app.core.cache import _USE_REDIS
+        if not _USE_REDIS:
+            logger.warning(
+                "REDIS_URL not set — cache is in-memory only. "
+                "Portfolio positions will not persist across restarts."
+            )
+
     # ── API key detection at startup ─────────────────────────────
     import os
     gemini_key = settings.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
