@@ -10,7 +10,6 @@ class Settings(BaseSettings):
 
     # API Keys
     fmp_api_key: str = ""
-    gemini_api_key: str = ""
     fred_api_key: str = ""
 
     # Alpaca Markets

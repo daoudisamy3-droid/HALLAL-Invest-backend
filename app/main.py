@@ -50,13 +50,12 @@ def create_app() -> FastAPI:
             )
 
     # ── API key detection at startup ─────────────────────────────
-    import os
-    gemini_key = settings.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
-    fmp_key = settings.fmp_api_key or os.getenv("FMP_API_KEY", "")
+    fmp_key = settings.fmp_api_key
+    alpaca_key = settings.alpaca_api_key
     logger.info(
-        "API KEYS CHECK: GEMINI_API_KEY=%s, FMP_API_KEY=%s",
-        ("DETECTED" if gemini_key else "MISSING"),
+        "API KEYS CHECK: FMP_API_KEY=%s, ALPACA_API_KEY=%s",
         ("DETECTED" if fmp_key else "MISSING"),
+        ("DETECTED" if alpaca_key else "MISSING"),
     )
 
     logger.info(
