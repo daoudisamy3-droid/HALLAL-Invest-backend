@@ -35,7 +35,8 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
         (low - prev_close).abs(),
     ], axis=1).max(axis=1)
 
-    return round(float(tr.rolling(period).mean().iloc[-1]), 4)
+    # Wilder EWM: alpha = 1/period (matches TradingView ATR)
+    return round(float(tr.ewm(alpha=1.0 / period, adjust=False).mean().iloc[-1]), 4)
 
 
 def compute_fibonacci_levels(df: pd.DataFrame) -> dict:
