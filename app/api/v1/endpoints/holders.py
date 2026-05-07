@@ -111,6 +111,13 @@ def _fetch_holders_blocking(symbol: str) -> dict:
             rows = []
             for _, row in trans.head(15).iterrows():
                 shares = row.get("Shares", 0)
+                tx_text = str(row.get("Transaction", "")).lower()
+                if any(w in tx_text for w in ("purchase", "buy", "acqui")):
+                    tx_type = "BUY"
+                elif any(w in tx_text for w in ("sale", "sell", "dispos")):
+                    tx_type = "SELL"
+                else:
+                    tx_type = "OTHER"
                 rows.append({
                     "insider": str(row.get("Insider", "")),
                     "relation": str(row.get("Relation", "")),
@@ -118,7 +125,7 @@ def _fetch_holders_blocking(symbol: str) -> dict:
                     "date": str(row.get("Start Date", ""))[:10],
                     "shares": int(shares or 0),
                     "value": int(row.get("Value", 0) or 0),
-                    "type": "BUY" if (shares or 0) > 0 else "SELL",
+                    "type": tx_type,
                 })
             result["insider_transactions"] = rows
         else:
@@ -132,6 +139,7 @@ def _fetch_holders_blocking(symbol: str) -> dict:
     trans_list = result.get("insider_transactions", [])
 
     top3_pct = sum(h["pct_held"] for h in inst_list[:3]) if inst_list else 0
+    # Count only BUY/SELL; OTHER (awards, grants, etc.) is excluded from signal
     recent_buys = sum(1 for tx in trans_list[:10] if tx["type"] == "BUY")
     recent_sells = sum(1 for tx in trans_list[:10] if tx["type"] == "SELL")
 
