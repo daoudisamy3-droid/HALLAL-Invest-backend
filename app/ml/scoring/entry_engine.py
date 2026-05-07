@@ -164,11 +164,9 @@ async def compute_entry_plan(symbol: str, sector: str = "") -> dict:
                 if deviation > 0.03:
                     logger.warning(
                         "entry_engine/%s: Alpaca close %.2f vs YF %.2f "
-                        "(deviation %.1f%%) — using YF live price",
+                        "(deviation %.1f%%) — keeping Alpaca close as scoring reference",
                         symbol, alpaca_last, yf_price, deviation * 100,
                     )
-                    df = df.copy()
-                    df.loc[df.index[-1], "close"] = yf_price
     except Exception as exc:
         logger.warning(
             "entry_engine/%s: YF reconciliation failed: %s — "
@@ -260,9 +258,11 @@ async def compute_entry_plan(symbol: str, sector: str = "") -> dict:
     # ── Take profit levels (resistances above current price) ──────
     swing_high = fibs["swing_high"]
     if scenario == "TENDANCE_HAUSSIÈRE":
+        ref = max(swing_high, current_price)
         tp_1 = round(current_price * 1.08, 2)
-        tp_2 = round(swing_high * 1.05, 2)
-        tp_3 = round(swing_high * 1.12, 2)
+        tp_2 = round(ref * 1.05, 2)
+        tp_3 = round(ref * 1.12, 2)
+        tp_1, tp_2, tp_3 = tuple(sorted([tp_1, tp_2, tp_3]))
     elif scenario == "CORRECTION":
         tp_1 = round(ma50 * 1.01, 2)
         tp_2 = round(ma200 * 1.02, 2) if ma200 > ma50 else round(ma50 * 1.05, 2)
