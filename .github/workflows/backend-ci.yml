@@ -1,0 +1,66 @@
+name: Backend CI
+
+on:
+  push:
+    branches:
+      - claude/setup-hallal-invest-backend-tIJl4
+    paths:
+      - "app/**"
+      - "alembic/**"
+      - "tests/**"
+      - "scripts/**"
+      - "requirements.txt"
+      - "alembic.ini"
+      - "pytest.ini"
+      - "conftest.py"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "alembic/**"
+      - "tests/**"
+      - "requirements.txt"
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: hallal_invest
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Alembic migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/hallal_invest
+        run: alembic upgrade head
+
+      - name: Run pytest (unit + integration)
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/hallal_invest
+          FINTERMINAL_API_KEY: ci-test-key-not-a-real-secret
+        run: python -m pytest -v --tb=short
