@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Depends
+
+from app.api.v1.endpoints import shariah as shariah_endpoint
 from app.core.security import verify_api_key
 
 # IMPORTANT: FastAPI serves /openapi.json and /docs at the app root (main.py),
@@ -15,3 +17,7 @@ api_router = APIRouter(
 @api_router.get("/ping", tags=["meta"])
 async def ping() -> dict[str, bool]:
     return {"pong": True}
+
+
+# ── Feature routers ───────────────────────────────────────────────────────────
+api_router.include_router(shariah_endpoint.router)  # GET /api/v1/shariah/{symbol}

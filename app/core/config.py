@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     # No default: missing value → ValidationError at startup (fail-fast).
     FINTERMINAL_API_KEY: str
 
+    # ── Halal Terminal API  §3.2.1 ───────────────────────────────────────────
+    # Provider that returns AAOIFI/DJIM/FTSE/MSCI/S&P screening ratios.
+    # We extract raw ratios and apply our own ShariahCustomThresholds (§5.1).
+    HALAL_TERMINAL_API_KEY: str  # No default — fail-fast like FINTERMINAL_API_KEY
+    HALAL_TERMINAL_BASE_URL: str = "https://api.halalterminal.com"
+    HALAL_TERMINAL_TIMEOUT_S: float = 10.0
+    SHARIAH_SCREEN_TTL_DAYS: int = 7  # §3.2.1 cache window
+
     # ── External data providers ───────────────────────────────────────────────
     FMP_API_KEY: Optional[str] = None
     ALPHA_VANTAGE_KEY: Optional[str] = None
