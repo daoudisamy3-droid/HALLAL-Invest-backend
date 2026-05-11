@@ -29,6 +29,7 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/hallal_invest
       FINTERMINAL_API_KEY: ci-test-key-not-a-real-secret
+      HALAL_TERMINAL_API_KEY: ci-test-key-not-a-real-secret
 
     services:
       postgres:
