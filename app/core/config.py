@@ -25,7 +25,15 @@ class Settings(BaseSettings):
     APP_VERSION: str = "0.1.0"
     DEBUG: bool = False
     SECRET_KEY: str = "change-me-in-production"
-    ALLOWED_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    ALLOWED_ORIGINS: list[str] = [
+        # Local dev
+        "http://localhost:5173",
+        "http://localhost:3000",
+        # Production frontend (Railway). Hardcoded for V1 — single stable URL.
+        # If a second deployed origin appears later (preview deploys, staging),
+        # switch this to an env-var-fed list.
+        "https://hallal-invest-frontend-production.up.railway.app",
+    ]
 
     # ── Shariah screening thresholds  §5.1 (ShariahCustomThresholds) ─────────
     # Stricter than AAOIFI standard — spec §5.1 justification :
