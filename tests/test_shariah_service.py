@@ -1,9 +1,12 @@
-"""Unit + integration tests for app/services/shariah_service.py.
+"""Unit + integration tests for app/services/shariah_service.py (free-tier mode).
 
-The HalalTerminalClient is replaced by an AsyncMock so we test the
-service logic in isolation. The DB is the real (SAVEPOINT-rolled-back)
-session from conftest — this is what validates the
-`screen_history`-as-cache contract.
+Free-tier deviation (see docs/SHARIAH_FREE_TIER_DEVIATION.md): the
+service consumes Halal Terminal's aggregate verdict instead of raw
+ratios. The 5 cases tested below mirror the contract in that doc.
+
+The HalalTerminalClient is replaced by an AsyncMock so we exercise the
+service logic in isolation. The DB is the real Postgres session from
+conftest (function-scoped, truncated on teardown).
 
 Reference tickers (Q plan): AAPL, MSFT, RIO, AIXA.DE, EOG.
 """
@@ -29,29 +32,34 @@ from app.services.shariah_service import (
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 
-def _compliant_payload(symbol: str) -> dict[str, Any]:
-    """Halal Terminal payload shape (§3.2.1) — comfortably compliant."""
+def _aggregate_pass_payload(symbol: str) -> dict[str, Any]:
+    """Free-tier Halal Terminal payload — all three flags compliant."""
     return {
         "symbol": symbol,
-        "overall_status": "compliant",
-        "ratios": {
-            "debt_to_marketcap": 0.020,
-            "debt_to_assets": 0.085,
-            "cash_to_marketcap": 0.0164,
-            "impure_revenue_ratio": 0.0023,
-            "interest_income_ratio": 0.0018,
-            "receivables_to_assets": 0.082,
-            "non_compliant_assets_ratio": 0.046,
-        },
-        "methodologies": {
-            "AAOIFI": {"status": "compliant", "failed_ratios": []},
-            "DJIM":   {"status": "compliant", "failed_ratios": []},
-            "FTSE":   {"status": "compliant", "failed_ratios": []},
-            "MSCI":   {"status": "compliant", "failed_ratios": []},
-            "S&P":    {"status": "compliant", "failed_ratios": []},
-        },
-        "compliance_explanation": "All ratios well under thresholds.",
-        "as_of_date": "2026-04-30",
+        "name": f"{symbol} Corp.",
+        "is_compliant": True,
+        "business_screen_pass": True,
+        "business_screen_reason": "Business activity is compliant.",
+        "financial_screen_pass": True,
+        "shariah_compliance_status": None,
+    }
+
+
+def _aggregate_fail_payload(
+    symbol: str,
+    *,
+    is_compliant: bool | None = False,
+    business_screen_pass: bool | None = False,
+    business_screen_reason: str | None = "Business activity involves non-halal income.",
+    financial_screen_pass: bool | None = True,
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "is_compliant": is_compliant,
+        "business_screen_pass": business_screen_pass,
+        "business_screen_reason": business_screen_reason,
+        "financial_screen_pass": financial_screen_pass,
+        "shariah_compliance_status": None,
     }
 
 
@@ -64,14 +72,16 @@ def _make_mock_client(payload: Any = None, raises: Exception | None = None) -> A
     return client
 
 
-# ─── §5.1 thresholds — anti-regression ──────────────────────────────────────
+# ─── §5.1 thresholds — anti-regression (constants still tracked) ────────────
 
 
 @pytest.mark.unit
 def test_thresholds_match_spec_5_1_strict() -> None:
-    """Anti-regression: the 4 bloquant thresholds must be 0.30/0.30/0.03/0.03.
+    """Anti-regression: the 4 bloquant thresholds remain 0.30/0.30/0.03/0.03.
 
-    The 0.45 receivables threshold is exposed for info but does not gate.
+    These constants are dormant in free-tier mode (we consume the
+    provider's aggregate verdict) but kept as the canonical record of
+    §5.1 — the day we get raw ratios back, the revert is a one-liner.
     """
     assert ShariahCustomThresholds.DEBT_TO_MARKETCAP_MAX == 0.30
     assert ShariahCustomThresholds.CASH_TO_MARKETCAP_MAX == 0.30
@@ -80,117 +90,185 @@ def test_thresholds_match_spec_5_1_strict() -> None:
     assert ShariahCustomThresholds.RECEIVABLES_TO_ASSETS_MAX == 0.45
 
 
-# ─── 5 reference tickers — happy path ───────────────────────────────────────
+# ─── CASE 2 — aggregate verdict PASS on 5 reference tickers ─────────────────
 
 
 @pytest.mark.integration
 @pytest.mark.parametrize("symbol", ["AAPL", "MSFT", "RIO", "AIXA.DE", "EOG"])
-async def test_screen_5_reference_tickers_pass(db, symbol: str) -> None:
-    mock_client = _make_mock_client(_compliant_payload(symbol))
+async def test_aggregate_verdict_pass_for_reference_tickers(db, symbol: str) -> None:
+    mock_client = _make_mock_client(_aggregate_pass_payload(symbol))
     report = await screen_with_personal_thresholds(symbol.lower(), db, mock_client)
 
-    assert report.symbol == symbol.upper()  # normalised
+    assert report.symbol == symbol.upper()
     assert report.verdict == "PASS"
     assert report.failed_checks == []
-    assert set(report.checks.keys()) == {
-        "debt_to_marketcap",
-        "cash_to_marketcap",
-        "impure_revenue_ratio",
-        "interest_income_ratio",
-    }
-    assert all(c.passed for c in report.checks.values())
-    assert report.checks["debt_to_marketcap"].threshold == 0.30
-    assert report.checks["impure_revenue_ratio"].threshold == 0.03
-    assert report.as_of_date == date(2026, 4, 30)
-    assert report.source == "Halal Terminal API + custom thresholds"
+    # Free-tier: no raw ratios surfaced → no checks built
+    assert report.checks == {}
+    assert report.halal_terminal_methodology_verdicts == {}
+    assert report.source == "Halal Terminal API (aggregate verdict)"
     assert report.cached is False
     mock_client.screen.assert_awaited_once_with(symbol.upper())
 
-
-# ─── FAIL marginal — one ratio just over ────────────────────────────────────
-
-
-@pytest.mark.integration
-async def test_fail_marginal_single_check(db) -> None:
-    payload = _compliant_payload("XOM")
-    payload["ratios"]["debt_to_marketcap"] = 0.31  # just over 0.30
-
-    mock_client = _make_mock_client(payload)
-    report = await screen_with_personal_thresholds("XOM", db, mock_client)
-
-    assert report.verdict == "FAIL"
-    assert report.failed_checks == ["debt_to_marketcap"]
-    assert report.checks["debt_to_marketcap"].passed is False
-    assert report.checks["debt_to_marketcap"].value == pytest.approx(0.31)
-    assert report.checks["cash_to_marketcap"].passed is True
-
-
-# ─── FAIL massif — multiple checks over ─────────────────────────────────────
-
-
-@pytest.mark.integration
-async def test_fail_multiple_checks(db) -> None:
-    payload = _compliant_payload("BAC")
-    payload["ratios"]["debt_to_marketcap"] = 0.45        # over 0.30
-    payload["ratios"]["impure_revenue_ratio"] = 0.12     # over 0.03
-    payload["ratios"]["interest_income_ratio"] = 0.20    # over 0.03
-
-    mock_client = _make_mock_client(payload)
-    report = await screen_with_personal_thresholds("BAC", db, mock_client)
-
-    assert report.verdict == "FAIL"
-    assert set(report.failed_checks) == {
-        "debt_to_marketcap",
-        "impure_revenue_ratio",
-        "interest_income_ratio",
-    }
-    assert report.checks["cash_to_marketcap"].passed is True  # the lone survivor
-
-
-# ─── NOT_COVERED — provider returns None ────────────────────────────────────
-
-
-@pytest.mark.integration
-async def test_not_covered_persists_row(db) -> None:
-    mock_client = _make_mock_client(None)
-    report = await screen_with_personal_thresholds("XYZ.XX", db, mock_client)
-
-    assert report.verdict == "NOT_COVERED"
-    assert report.cached is False
-    assert "non couvert" in (report.reason or "")
-
-    # Persistence: a screen_history row should now exist
+    # Persisted (PASS is a stable verdict → cacheable for the TTL window)
     rows = (await db.execute(
-        select(ScreenHistory).where(ScreenHistory.symbol == "XYZ.XX")
+        select(ScreenHistory).where(ScreenHistory.symbol == symbol.upper())
     )).scalars().all()
     assert len(rows) == 1
-    assert rows[0].verdict == "NOT_COVERED"
+    assert rows[0].verdict == "PASS"
 
 
-# ─── ERROR — provider raises ────────────────────────────────────────────────
+# ─── CASE 3 — aggregate verdict FAIL on each failure branch ─────────────────
 
 
 @pytest.mark.integration
-async def test_error_not_persisted(db) -> None:
+async def test_aggregate_verdict_fail_business_screen(db) -> None:
+    mock_client = _make_mock_client(_aggregate_fail_payload(
+        "BAD_BIZ",
+        is_compliant=False,
+        business_screen_pass=False,
+        business_screen_reason="More than 5% of revenue from alcohol.",
+        financial_screen_pass=True,
+    ))
+    report = await screen_with_personal_thresholds("BAD_BIZ", db, mock_client)
+
+    assert report.verdict == "FAIL"
+    assert report.source == "Halal Terminal API (aggregate verdict)"
+    assert "alcohol" in (report.reason or "")
+
+    rows = (await db.execute(
+        select(ScreenHistory).where(ScreenHistory.symbol == "BAD_BIZ")
+    )).scalars().all()
+    assert len(rows) == 1
+
+
+@pytest.mark.integration
+async def test_aggregate_verdict_fail_financial_screen(db) -> None:
+    mock_client = _make_mock_client({
+        "symbol": "BAD_FIN",
+        "is_compliant": False,
+        "business_screen_pass": True,
+        "business_screen_reason": "Business activity is compliant.",
+        "financial_screen_pass": False,
+        "financial_screen_reason": "Debt-to-marketcap exceeds AAOIFI 33% cap.",
+    })
+    report = await screen_with_personal_thresholds("BAD_FIN", db, mock_client)
+
+    assert report.verdict == "FAIL"
+    assert "33%" in (report.reason or "") or "Debt" in (report.reason or "")
+
+
+@pytest.mark.integration
+async def test_aggregate_verdict_fail_is_compliant_only(db) -> None:
+    """Edge case: is_compliant=false but both sub-screens didn't say which.
+
+    Should still FAIL with a generic reason rather than masking the call.
+    """
+    mock_client = _make_mock_client({
+        "symbol": "AMBIGUOUS_FAIL",
+        "is_compliant": False,
+        "business_screen_pass": True,
+        "financial_screen_pass": True,
+    })
+    report = await screen_with_personal_thresholds("AMBIGUOUS_FAIL", db, mock_client)
+
+    assert report.verdict == "FAIL"
+    assert "non-conforme" in (report.reason or "").lower()
+
+
+# ─── CASE 1 — ticker_unknown ⇒ NOT_COVERED (NEVER cached) ───────────────────
+
+
+@pytest.mark.integration
+async def test_ticker_unknown_returns_not_covered(db) -> None:
+    mock_client = _make_mock_client({
+        "symbol": "ZZZBIDON",
+        "is_compliant": None,
+        "error": "ticker_unknown",
+        "error_message": "Symbol 'ZZZBIDON' is not in our universe; no Shariah verdict available.",
+    })
+    report = await screen_with_personal_thresholds("zzzbidon", db, mock_client)
+
+    assert report.symbol == "ZZZBIDON"
+    assert report.verdict == "NOT_COVERED"
+    assert report.source == "Halal Terminal API (aggregate verdict)"
+    assert "ZZZBIDON" in (report.reason or "")
+
+    # NEW behaviour vs Step 1: NOT_COVERED is NOT persisted
+    # (coverage can extend, do not freeze for 7 days)
+    rows = (await db.execute(
+        select(ScreenHistory).where(ScreenHistory.symbol == "ZZZBIDON")
+    )).scalars().all()
+    assert rows == []
+
+
+@pytest.mark.integration
+async def test_not_covered_is_NOT_cached_across_calls(db) -> None:
+    """Second NOT_COVERED call must hit upstream again, not the cache."""
+    mock_client = _make_mock_client({
+        "symbol": "FAKE",
+        "is_compliant": None,
+        "error": "ticker_unknown",
+        "error_message": "Symbol 'FAKE' is not in our universe.",
+    })
+    first = await screen_with_personal_thresholds("FAKE", db, mock_client)
+    second = await screen_with_personal_thresholds("FAKE", db, mock_client)
+
+    assert first.verdict == "NOT_COVERED"
+    assert second.verdict == "NOT_COVERED"
+    assert second.cached is False
+    assert mock_client.screen.await_count == 2  # called twice — no cache hit
+
+
+# ─── CASE 4 — incomplete response ⇒ ERROR (NOT cached) ──────────────────────
+
+
+@pytest.mark.integration
+async def test_incomplete_response_returns_error(db) -> None:
+    mock_client = _make_mock_client({
+        "symbol": "WEIRD",
+        "name": "Weird Inc.",
+        "is_compliant": None,
+        "business_screen_pass": None,
+        "financial_screen_pass": None,
+        # no `error` field — so it's not CASE 1
+    })
+    report = await screen_with_personal_thresholds("WEIRD", db, mock_client)
+
+    assert report.verdict == "ERROR"
+    assert report.source == "Halal Terminal API (error)"
+    assert "incomplète" in (report.reason or "").lower()
+
+    # ERROR not persisted
+    rows = (await db.execute(
+        select(ScreenHistory).where(ScreenHistory.symbol == "WEIRD")
+    )).scalars().all()
+    assert rows == []
+
+
+# ─── CASE 5 — HalalTerminalError ⇒ ERROR (NOT cached) ───────────────────────
+
+
+@pytest.mark.integration
+async def test_halal_terminal_http_error_returns_error(db) -> None:
     mock_client = _make_mock_client(raises=HalalTerminalError("upstream 500"))
     report = await screen_with_personal_thresholds("AAPL", db, mock_client)
 
     assert report.verdict == "ERROR"
+    assert report.source == "Halal Terminal API (error)"
     assert "indisponible" in (report.reason or "").lower()
 
-    # Persistence: NO row should be written for ERROR (spec §3.4)
     rows = (await db.execute(
         select(ScreenHistory).where(ScreenHistory.symbol == "AAPL")
     )).scalars().all()
     assert rows == []
 
 
-# ─── Cache MISS persists a row ──────────────────────────────────────────────
+# ─── Cache layer behaviour ──────────────────────────────────────────────────
 
 
 @pytest.mark.integration
-async def test_cache_miss_persists_screen_history_row(db) -> None:
-    mock_client = _make_mock_client(_compliant_payload("AAPL"))
+async def test_cache_miss_persists_pass_row(db) -> None:
+    mock_client = _make_mock_client(_aggregate_pass_payload("AAPL"))
     await screen_with_personal_thresholds("AAPL", db, mock_client)
 
     rows = (await db.execute(
@@ -200,21 +278,16 @@ async def test_cache_miss_persists_screen_history_row(db) -> None:
     row = rows[0]
     assert row.verdict == "PASS"
     assert row.screen_date == date.today()
-    # ratios_json must contain enough to reconstruct the report
+    # ratios_json still has the (empty) structural keys for forward-compat
     payload = row.ratios_json
     assert "raw_ratios" in payload
     assert "checks" in payload
-    assert "halal_terminal_methodology_verdicts" in payload
-    assert payload["as_of_date"] == "2026-04-30"
-    assert payload["failed_checks"] == []
-
-
-# ─── Cache HIT — second call within TTL avoids upstream ─────────────────────
+    assert payload["checks"] == {}
 
 
 @pytest.mark.integration
 async def test_cache_hit_within_ttl_skips_upstream(db) -> None:
-    mock_client = _make_mock_client(_compliant_payload("MSFT"))
+    mock_client = _make_mock_client(_aggregate_pass_payload("MSFT"))
 
     first = await screen_with_personal_thresholds("MSFT", db, mock_client)
     assert first.cached is False
@@ -225,140 +298,31 @@ async def test_cache_hit_within_ttl_skips_upstream(db) -> None:
     assert second.source == "cache (screen_history)"
     assert second.cache_age_days == 0
     assert second.verdict == "PASS"
-    assert second.checks == first.checks
     assert mock_client.screen.await_count == 1  # NOT called again
-
-
-# ─── Cache MISS — stale row older than TTL is ignored ───────────────────────
 
 
 @pytest.mark.integration
 async def test_stale_row_outside_ttl_triggers_refetch(db) -> None:
-    # Seed a stale row (8 days old) directly in the DB
+    """A row older than SHARIAH_SCREEN_TTL_DAYS must be ignored."""
     stale = ScreenHistory(
         id=uuid.uuid4(),
         symbol="RIO",
         screen_date=date.today() - timedelta(days=8),
-        ratios_json={"raw_ratios": {}, "checks": {}, "halal_terminal_methodology_verdicts": {}, "as_of_date": None, "failed_checks": []},
+        ratios_json={
+            "raw_ratios": {},
+            "checks": {},
+            "halal_terminal_methodology_verdicts": {},
+            "as_of_date": None,
+            "failed_checks": [],
+            "reason": None,
+        },
         verdict="PASS",
     )
     db.add(stale)
     await db.commit()
 
-    mock_client = _make_mock_client(_compliant_payload("RIO"))
+    mock_client = _make_mock_client(_aggregate_pass_payload("RIO"))
     report = await screen_with_personal_thresholds("RIO", db, mock_client)
 
     assert report.cached is False
-    assert mock_client.screen.await_count == 1  # was called despite stale row
-
-
-# ─── NOT_COVERED cache HIT ──────────────────────────────────────────────────
-
-
-@pytest.mark.integration
-async def test_not_covered_is_cached(db) -> None:
-    mock_client = _make_mock_client(None)
-    first = await screen_with_personal_thresholds("ZZZ", db, mock_client)
-    assert first.verdict == "NOT_COVERED"
-
-    second = await screen_with_personal_thresholds("ZZZ", db, mock_client)
-    assert second.verdict == "NOT_COVERED"
-    assert second.cached is True
     assert mock_client.screen.await_count == 1
-
-
-# ─── Step 1.5 hotfix — Fix A guard against empty/null ratios ────────────────
-
-
-@pytest.mark.integration
-async def test_empty_ratios_object_returns_error_not_pass(db) -> None:
-    """Regression: HT returning `{"ratios": {}}` must NOT silently PASS.
-
-    This is the bug that almost shipped to production: a halal gate that
-    answers PASS when the upstream gave no usable data is catastrophic.
-    """
-    mock_client = _make_mock_client({
-        "symbol": "ZZZBIDON",
-        "overall_status": "compliant",
-        "ratios": {},   # ← empty — Fix A trap
-        "methodologies": {
-            "AAOIFI": {"status": "compliant", "failed_ratios": []},
-        },
-        "as_of_date": "2026-04-30",
-    })
-    report = await screen_with_personal_thresholds("ZZZBIDON", db, mock_client)
-
-    assert report.verdict == "ERROR"
-    assert report.failed_checks == []
-    assert "ratio exploitable" in (report.reason or "").lower() \
-        or "ratios" in (report.reason or "").lower()
-    assert report.source == "Halal Terminal API (empty ratios payload)"
-    # Methodology verdicts are preserved for downstream UI even on ERROR
-    assert "AAOIFI" in report.halal_terminal_methodology_verdicts
-
-    # ERROR is NEVER persisted (no cache poisoning)
-    rows = (await db.execute(
-        select(ScreenHistory).where(ScreenHistory.symbol == "ZZZBIDON")
-    )).scalars().all()
-    assert rows == [], "ERROR verdict must not be persisted to screen_history"
-
-
-@pytest.mark.integration
-async def test_all_null_bloquant_ratios_returns_error(db) -> None:
-    """The actual pollution shape from production: 4 bloquant ratios = null."""
-    mock_client = _make_mock_client({
-        "symbol": "NULLS",
-        "ratios": {
-            "debt_to_marketcap":     None,
-            "cash_to_marketcap":     None,
-            "impure_revenue_ratio":  None,
-            "interest_income_ratio": None,
-            "debt_to_assets":        None,
-            "receivables_to_assets": None,
-        },
-        "methodologies": {},
-        "as_of_date": "2026-04-30",
-    })
-    report = await screen_with_personal_thresholds("NULLS", db, mock_client)
-
-    assert report.verdict == "ERROR"
-    # Not persisted
-    rows = (await db.execute(
-        select(ScreenHistory).where(ScreenHistory.symbol == "NULLS")
-    )).scalars().all()
-    assert rows == []
-
-
-@pytest.mark.integration
-async def test_partial_ratios_still_passes_per_spec_5_2(db) -> None:
-    """Fix A guards on ALL ratios missing, not on partial.
-
-    Spec §5.2 explicitly uses ``ratios.get(field, 0)`` — a single missing
-    ratio defaults to 0 (passes its check). Fix A bails ONLY when 0 of 4
-    bloquant ratios are present. When 1+ are present, the spec's
-    permissive default still applies.
-    """
-    mock_client = _make_mock_client({
-        "symbol": "PARTIAL",
-        "ratios": {
-            "debt_to_marketcap":     0.02,
-            "cash_to_marketcap":     0.05,
-            "impure_revenue_ratio":  0.01,
-            # interest_income_ratio absent → spec §5.2 defaults to 0
-        },
-        "methodologies": {},
-        "as_of_date": "2026-04-30",
-    })
-    report = await screen_with_personal_thresholds("PARTIAL", db, mock_client)
-
-    assert report.verdict == "PASS"
-    assert report.checks["interest_income_ratio"].value == 0.0
-    assert report.checks["interest_income_ratio"].passed is True
-    assert report.checks["debt_to_marketcap"].value == pytest.approx(0.02)
-
-    # PASS with at least one real ratio → legitimate, gets cached
-    rows = (await db.execute(
-        select(ScreenHistory).where(ScreenHistory.symbol == "PARTIAL")
-    )).scalars().all()
-    assert len(rows) == 1
-    assert rows[0].verdict == "PASS"

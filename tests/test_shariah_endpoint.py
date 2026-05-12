@@ -25,24 +25,16 @@ from app.main import app
 TEST_KEY = "test-uuid-key-0000"
 
 
-def _compliant_payload(symbol: str) -> dict:
+def _aggregate_pass_payload(symbol: str) -> dict:
+    """Free-tier Halal Terminal payload — aggregate verdict shape."""
     return {
         "symbol": symbol,
-        "overall_status": "compliant",
-        "ratios": {
-            "debt_to_marketcap": 0.020,
-            "debt_to_assets": 0.085,
-            "cash_to_marketcap": 0.0164,
-            "impure_revenue_ratio": 0.0023,
-            "interest_income_ratio": 0.0018,
-            "receivables_to_assets": 0.082,
-            "non_compliant_assets_ratio": 0.046,
-        },
-        "methodologies": {
-            m: {"status": "compliant", "failed_ratios": []}
-            for m in ("AAOIFI", "DJIM", "FTSE", "MSCI", "S&P")
-        },
-        "as_of_date": "2026-04-30",
+        "name": f"{symbol} Inc.",
+        "is_compliant": True,
+        "business_screen_pass": True,
+        "business_screen_reason": "Business activity is compliant.",
+        "financial_screen_pass": True,
+        "shariah_compliance_status": None,
     }
 
 
@@ -73,7 +65,7 @@ async def test_unauthenticated_returns_401(client: httpx.AsyncClient) -> None:
 
 @pytest.mark.integration
 async def test_authenticated_pass_verdict(client: httpx.AsyncClient) -> None:
-    client.fake_halal_client.screen.return_value = _compliant_payload("AAPL")  # type: ignore[attr-defined]
+    client.fake_halal_client.screen.return_value = _aggregate_pass_payload("AAPL")  # type: ignore[attr-defined]
 
     resp = await client.get(
         "/api/v1/shariah/AAPL",
@@ -85,10 +77,10 @@ async def test_authenticated_pass_verdict(client: httpx.AsyncClient) -> None:
     assert body["symbol"] == "AAPL"
     assert body["verdict"] == "PASS"
     assert body["failed_checks"] == []
-    assert body["source"] == "Halal Terminal API + custom thresholds"
+    assert body["source"] == "Halal Terminal API (aggregate verdict)"
     assert body["cached"] is False
-    assert "checks" in body and "debt_to_marketcap" in body["checks"]
-    assert body["checks"]["debt_to_marketcap"]["threshold"] == 0.30
+    # Free-tier deviation: no raw ratios surfaced → checks dict is empty
+    assert body["checks"] == {}
 
 
 @pytest.mark.integration
@@ -106,6 +98,7 @@ async def test_endpoint_returns_error_verdict_on_upstream_failure(
     assert resp.status_code == 200
     body = resp.json()
     assert body["verdict"] == "ERROR"
+    assert body["source"] == "Halal Terminal API (error)"
     assert "indisponible" in body["reason"].lower()
 
 
@@ -113,7 +106,7 @@ async def test_endpoint_returns_error_verdict_on_upstream_failure(
 async def test_endpoint_symbol_is_normalised_to_uppercase(
     client: httpx.AsyncClient,
 ) -> None:
-    client.fake_halal_client.screen.return_value = _compliant_payload("AAPL")  # type: ignore[attr-defined]
+    client.fake_halal_client.screen.return_value = _aggregate_pass_payload("AAPL")  # type: ignore[attr-defined]
 
     resp = await client.get(
         "/api/v1/shariah/aapl",
@@ -122,3 +115,27 @@ async def test_endpoint_symbol_is_normalised_to_uppercase(
 
     assert resp.status_code == 200
     assert resp.json()["symbol"] == "AAPL"
+
+
+@pytest.mark.integration
+async def test_endpoint_returns_not_covered_for_ticker_unknown(
+    client: httpx.AsyncClient,
+) -> None:
+    """Free-tier ticker_unknown response surfaces as NOT_COVERED in the body."""
+    client.fake_halal_client.screen.return_value = {  # type: ignore[attr-defined]
+        "symbol": "ZZZBIDON",
+        "is_compliant": None,
+        "error": "ticker_unknown",
+        "error_message": "Symbol 'ZZZBIDON' is not in our universe; no Shariah verdict available.",
+    }
+
+    resp = await client.get(
+        "/api/v1/shariah/ZZZBIDON",
+        headers={"X-Auth-Token": TEST_KEY},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["verdict"] == "NOT_COVERED"
+    assert "ZZZBIDON" in body["reason"]
+    assert body["source"] == "Halal Terminal API (aggregate verdict)"

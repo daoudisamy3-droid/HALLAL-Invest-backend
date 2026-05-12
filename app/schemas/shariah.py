@@ -7,14 +7,21 @@ Spec authority:
     halal_terminal_methodology_verdicts / raw_ratios / as_of_date /
     source)
 
-Documented deviations from §5.2 (validated extension, Step 1, Q4):
+Free-tier deviation (Step 1.5 refactor — see
+``docs/SHARIAH_FREE_TIER_DEVIATION.md``):
+  - The free tier of Halal Terminal does NOT expose `ratios` —
+    we consume the provider's aggregate verdict instead. As a
+    consequence `checks`, `methodology_verdicts` and `raw_ratios`
+    are empty in every fresh response. The schema keeps them
+    (as empty dicts / a defaulted ShariahRatios) so the frontend
+    contract stays stable and we can re-populate them later when
+    the upgrade or alternate source unlocks the raw ratios.
+
+Documented extensions of §5.2 (validated Step 1, Q4):
   - `cached: bool` — true when the report was served from
     `screen_history` rather than a fresh upstream call.
   - `cache_age_days: int | None` — days elapsed since the cached row
-    was inserted, surfaced for UI consumers that want to show
-    freshness.
-  - `source` enriched: either "Halal Terminal API + custom thresholds"
-    (fresh call) or "cache (screen_history)" (cache hit).
+    was inserted.
 These fields are additive and never override the §5.2 contract;
 downstream consumers that ignore them keep working unchanged.
 """
@@ -33,14 +40,18 @@ CheckName = Literal[
     "impure_revenue_ratio",
     "interest_income_ratio",
 ]
+Source = Literal[
+    "Halal Terminal API (aggregate verdict)",
+    "Halal Terminal API (error)",
+    "cache (screen_history)",
+]
 
 
 class ShariahRatios(BaseModel):
     """Raw ratios returned by Halal Terminal §3.2.1.
 
     All fields optional: providers may omit any subset depending on
-    coverage. We extract what we need; missing ratios that map to a
-    bloquant check default to 0.0 in the service layer (cf. §5.2).
+    coverage. The free tier omits all of them — see schema docstring.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -55,7 +66,11 @@ class ShariahRatios(BaseModel):
 
 
 class ShariahCheck(BaseModel):
-    """One of the 4 bloquant checks evaluated against §5.1 thresholds."""
+    """One of the 4 bloquant checks evaluated against §5.1 thresholds.
+
+    Populated only when the upstream surfaces raw ratios. Empty in
+    free-tier mode — see schema docstring.
+    """
 
     value: float
     threshold: float
@@ -80,35 +95,45 @@ class ShariahReport(BaseModel):
     """Response of `GET /api/v1/shariah/{symbol}`.
 
     Mirrors §5.2 output, extended with cache metadata (see module
-    docstring).
+    docstring). In free-tier mode, the 4-checks / methodology /
+    raw_ratios fields are empty by design.
     """
 
     symbol: str = Field(..., description="Ticker normalised to uppercase")
     verdict: Verdict
 
-    # §5.2 — list of failed bloquant checks (empty if verdict == PASS)
+    # §5.2 — list of failed bloquant checks (empty in free-tier mode)
     failed_checks: list[CheckName] = Field(default_factory=list)
 
     # §5.2 — 4 bloquant checks evaluated against §5.1 thresholds
+    # Empty {} in free-tier mode (no raw ratios available)
     checks: dict[CheckName, ShariahCheck] = Field(default_factory=dict)
 
     # §3.2.1 — verdicts of the 5 published methodologies (informational)
+    # Empty {} in free-tier mode
     halal_terminal_methodology_verdicts: dict[str, MethodologyVerdict] = Field(
         default_factory=dict
     )
 
     # §3.2.1 — raw ratios from provider (7 ratios incl. non-bloquant ones)
+    # All None fields in free-tier mode
     raw_ratios: ShariahRatios = Field(default_factory=ShariahRatios)
 
     # §3.2.1 — date the financial data is current as of (per provider)
+    # Always None in free-tier mode (provider does not surface it)
     as_of_date: date | None = None
 
-    # §5.2 — provenance
-    source: str
+    # §5.2 — provenance (strict Literal for OpenAPI clarity)
+    source: Source
 
     # Cache metadata (extension, see module docstring)
     cached: bool = False
     cache_age_days: int | None = None
 
-    # Human-readable error message when verdict in {"ERROR", "NOT_COVERED"}
+    # Human-readable rationale.
+    # PASS  → optional context
+    # FAIL  → which screen failed (business / financial / is_compliant)
+    # ERROR → provider failure or incomplete response
+    # NOT_COVERED → ticker_unknown message from provider
     reason: str | None = None
+
