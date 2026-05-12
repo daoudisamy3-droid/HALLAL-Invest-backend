@@ -35,6 +35,7 @@ _TABLES_TO_TRUNCATE = (
     "screen_history",
     "conviction_history",
     "fair_value_history",
+    "financials_cache",  # Step 2 technical cache table
 )
 
 

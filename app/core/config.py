@@ -98,6 +98,18 @@ class Settings(BaseSettings):
     HALAL_TERMINAL_TIMEOUT_S: float = 10.0
     SHARIAH_SCREEN_TTL_DAYS: int = 7  # §3.2.1 cache window
 
+    # ── SEC EDGAR  §3.2.2 ────────────────────────────────────────────────────
+    # SEC requires the User-Agent header to identify the calling application
+    # plus a contact email. Fail-fast on Railway if the variable is missing —
+    # any SEC call without a proper UA gets a non-explicit 403.
+    # Reminder (rule durcie): adding a new fail-fast var MUST be accompanied
+    # by the same placeholder in .github/workflows/backend-ci.yml job-level env.
+    SEC_EDGAR_USER_AGENT: str  # No default
+    SEC_EDGAR_BASE_URL: str = "https://data.sec.gov"
+    SEC_EDGAR_TICKER_MAP_URL: str = "https://www.sec.gov/files/company_tickers.json"
+    SEC_EDGAR_TIMEOUT_S: float = 15.0
+    FINANCIALS_CACHE_TTL_HOURS: int = 24  # §3.2.2 cache window
+
     # ── External data providers ───────────────────────────────────────────────
     FMP_API_KEY: Optional[str] = None
     ALPHA_VANTAGE_KEY: Optional[str] = None

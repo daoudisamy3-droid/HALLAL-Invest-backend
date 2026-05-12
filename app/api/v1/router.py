@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends
 
+from app.api.v1.endpoints import financials as financials_endpoint
 from app.api.v1.endpoints import shariah as shariah_endpoint
 from app.core.security import verify_api_key
 
@@ -20,4 +21,5 @@ async def ping() -> dict[str, bool]:
 
 
 # ── Feature routers ───────────────────────────────────────────────────────────
-api_router.include_router(shariah_endpoint.router)  # GET /api/v1/shariah/{symbol}
+api_router.include_router(shariah_endpoint.router)     # GET /api/v1/shariah/{symbol}
+api_router.include_router(financials_endpoint.router)  # GET /api/v1/financials/{ticker}

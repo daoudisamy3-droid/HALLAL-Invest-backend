@@ -23,3 +23,22 @@ class HalalTerminalNotCovered(HalalTerminalError):
     Not a transport error: the API is healthy, the symbol is simply
     out of coverage. Downstream verdict: "NOT_COVERED".
     """
+
+
+class SECEdgarError(ExternalAPIError):
+    """SEC EDGAR API unreachable or returned an unexpected error.
+
+    Per master-prompt §5.4: SEC EDGAR has a fallback (YFinance + FMP +
+    warning). The service layer must surface this as a verdict ERROR
+    on the financials snapshot, not propagate further.
+    """
+
+
+class SECEdgarNotFound(SECEdgarError):
+    """SEC EDGAR returned 404 for the requested resource.
+
+    Typical cases:
+      - Ticker not in company_tickers.json (non-US or unknown)
+      - CIK has no facts (very rare; usually de-listed shell)
+    Downstream verdict: "NOT_COVERED".
+    """
