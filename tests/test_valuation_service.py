@@ -99,25 +99,25 @@ def test_graham_unavailable_when_shares_missing() -> None:
     assert "shares_outstanding" in (result.reason or "")
 
 
-# ─── Methods 1, 2, 4 — always unavailable in V1 ──────────────────────────────
+# ─── Methods 1, 2, 4 — unavailable when YFinance inputs absent ──────────────
 
 
 @pytest.mark.unit
-def test_methods_1_2_4_always_unavailable_in_v1() -> None:
+def test_methods_1_2_4_unavailable_without_yfinance_inputs() -> None:
+    """Without YFinance history / .info, M1 + M4 fail gracefully; M2 still V1 stub."""
     facts = make_facts({
         "EarningsPerShareDiluted":      [("2024-12-31", 5)],
         "StockholdersEquity":           [("2024-12-31", 100)],
         "CommonStockSharesOutstanding": [("2024-12-31", 10)],
     })
-    m1 = vs._method_vs_historical_5y(facts)
+    m1 = vs._method_vs_historical_5y(facts, history=None, current_price=None)
     m2 = vs._method_vs_sector(facts)
-    m4 = vs._method_analyst_target(facts)
+    m4 = vs._method_analyst_target(info=None)
 
     for m, name in [(m1, "vs_historical_5y"), (m2, "vs_sector"), (m4, "analyst_target")]:
-        assert m.available is False, f"{name} should be unavailable in V1"
+        assert m.available is False, f"{name} should be unavailable"
         assert m.fair_value is None
-        assert m.reason is not None
-        assert "V1" in m.reason
+        assert m.reason
 
 
 # ─── Aggregation ────────────────────────────────────────────────────────────
@@ -310,3 +310,175 @@ async def test_e2e_sec_edgar_failure_returns_indetermine(db, monkeypatch) -> Non
     assert report.verdict == "INDÉTERMINÉ"
     assert "SEC EDGAR" in (report.reason or "")
     assert report.n_methods == 0
+
+
+# ─── Step 5 — Method 1 (multiples vs 5y) unit tests ─────────────────────────
+
+
+@pytest.mark.unit
+def test_method1_returns_unavailable_when_history_none() -> None:
+    facts = make_facts({"EarningsPerShareDiluted": [("2024-12-31", 5)]})
+    m = vs._method_vs_historical_5y(facts, history=None, current_price=Decimal("100"))
+    assert m.available is False
+    assert m.reason and "YFinance" in m.reason
+
+
+@pytest.mark.unit
+def test_method1_returns_unavailable_when_eps_history_too_short() -> None:
+    """Only the latest year of EPS → can't compute historical median P/E."""
+    facts = make_facts({"EarningsPerShareDiluted": [("2024-12-31", 5)]})
+    bars = [{"date": f"2024-{m:02d}-28", "close": 50.0} for m in range(1, 13)]
+    m = vs._method_vs_historical_5y(facts, history=bars, current_price=Decimal("50"))
+    assert m.available is False
+    assert m.reason and "EPS" in m.reason
+
+
+@pytest.mark.unit
+def test_method1_returns_unavailable_when_latest_eps_non_positive() -> None:
+    facts = make_facts({
+        "EarningsPerShareDiluted": [
+            ("2024-12-31", Decimal("-1")),
+            ("2023-12-31", Decimal("5")),
+        ],
+    })
+    bars = [{"date": "2024-06-30", "close": 50.0}]
+    m = vs._method_vs_historical_5y(facts, history=bars, current_price=Decimal("50"))
+    assert m.available is False
+    assert m.reason and "non-positif" in m.reason
+
+
+@pytest.mark.unit
+def test_method1_computes_fair_value_from_pe_median_exact() -> None:
+    """Deterministic case: EPS constant at 2.0 across years, 24 monthly bars
+    all priced at 30 → historical P/E = 15 → fair_value = 15 × 2 = 30 (exact)."""
+    facts = make_facts({
+        "EarningsPerShareDiluted": [
+            ("2024-12-31", Decimal("2")),
+            ("2023-12-31", Decimal("2")),
+            ("2022-12-31", Decimal("2")),
+        ],
+    })
+    bars = []
+    for year in (2023, 2024):
+        for month in range(1, 13):
+            day = 28
+            bars.append({"date": f"{year}-{month:02d}-{day:02d}", "close": 30.0})
+
+    m = vs._method_vs_historical_5y(
+        facts, history=bars, current_price=Decimal("30")
+    )
+    assert m.available is True
+    assert m.fair_value == Decimal("30")
+    assert Decimal(m.details["latest_eps"]) == Decimal("2")
+    assert m.details["n_pe_observations"] == 24
+
+
+@pytest.mark.unit
+def test_method1_rejects_when_fewer_than_12_observations() -> None:
+    facts = make_facts({
+        "EarningsPerShareDiluted": [
+            ("2024-12-31", Decimal("2")),
+            ("2023-12-31", Decimal("2")),
+        ],
+    })
+    # Only 6 valid bars
+    bars = [{"date": f"2024-{m:02d}-28", "close": 30.0} for m in range(1, 7)]
+    m = vs._method_vs_historical_5y(facts, history=bars, current_price=Decimal("30"))
+    assert m.available is False
+    assert m.reason and "12" in m.reason
+
+
+# ─── Step 5 — Method 4 (analyst target) unit tests ──────────────────────────
+
+
+@pytest.mark.unit
+def test_method4_unavailable_when_info_none() -> None:
+    m = vs._method_analyst_target(None)
+    assert m.available is False
+    assert m.reason and "YFinance" in m.reason
+
+
+@pytest.mark.unit
+def test_method4_unavailable_when_target_missing() -> None:
+    m = vs._method_analyst_target({"numberOfAnalystOpinions": 20})
+    assert m.available is False
+    assert m.reason
+
+
+@pytest.mark.unit
+def test_method4_unavailable_when_fewer_than_5_analysts() -> None:
+    m = vs._method_analyst_target({
+        "targetMedianPrice": 250.0,
+        "numberOfAnalystOpinions": 3,
+    })
+    assert m.available is False
+    assert m.reason and ("5" in m.reason or "analyst" in m.reason)
+
+
+@pytest.mark.unit
+def test_method4_available_with_valid_target_and_enough_analysts() -> None:
+    m = vs._method_analyst_target({
+        "targetMedianPrice": 250.0,
+        "targetLowPrice": 200.0,
+        "targetHighPrice": 320.0,
+        "numberOfAnalystOpinions": 25,
+    })
+    assert m.available is True
+    assert m.fair_value == Decimal("250.0")
+    assert m.details["number_of_analyst_opinions"] == 25
+
+
+# ─── Step 5 — end-to-end with YFinance wired ────────────────────────────────
+
+
+@pytest.mark.integration
+async def test_e2e_with_yfinance_methods_1_3_4_available(db, monkeypatch) -> None:
+    """When YFinance returns useful data, M1 + M3 + M4 all become available
+    and the verdict computes against a real ratio (current_price / median)."""
+    facts = make_facts({
+        "EarningsPerShareDiluted": [
+            ("2024-12-31", Decimal("2")),
+            ("2023-12-31", Decimal("2")),
+        ],
+        "StockholdersEquity":           [("2024-12-31", 10)],
+        "CommonStockSharesOutstanding": [("2024-12-31", 1)],  # → Graham 15
+    })
+    monkeypatch.setattr(
+        vs.financials_service,
+        "get_facts_payload",
+        AsyncMock(return_value=(320193, "Test Corp", facts)),
+    )
+
+    class _FakeYF:
+        async def get_info(self, _s):
+            return {
+                "regularMarketPrice": 30.0,
+                "targetMedianPrice": 40.0,
+                "numberOfAnalystOpinions": 20,
+            }
+
+        async def get_history(self, _s, **_kw):
+            return [
+                {"date": f"2024-{m:02d}-28", "close": 30.0}
+                for m in range(1, 13)
+            ] + [
+                {"date": f"2023-{m:02d}-28", "close": 30.0}
+                for m in range(1, 13)
+            ]
+
+    report = await vs.compute_valuation(
+        "TST", db, AsyncMock(), yfinance_client=_FakeYF(),
+    )
+
+    # Graham=15, M1=30, M4=40 → 3 methods, median=30
+    assert report.n_methods == 3
+    assert report.methods["graham_number"].available is True
+    assert report.methods["vs_historical_5y"].available is True
+    assert report.methods["analyst_target"].available is True
+    assert report.methods["vs_sector"].available is False  # still V1 stub
+    assert report.fair_value_median == Decimal("30")
+    assert report.current_price == Decimal("30")
+    # ratio = 30/30 = 1.0 → JUSTE PRIX
+    assert report.ratio_price_to_fair_value == Decimal("1")
+    assert report.verdict == "OUI_NEUTRE"
+    assert report.label == "JUSTE PRIX"

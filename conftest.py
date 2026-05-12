@@ -36,6 +36,7 @@ _TABLES_TO_TRUNCATE = (
     "conviction_history",
     "fair_value_history",
     "financials_cache",  # Step 2 technical cache table
+    "yfinance_cache",  # Step 5 technical cache table
 )
 
 

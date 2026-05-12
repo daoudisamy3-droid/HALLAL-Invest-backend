@@ -110,6 +110,15 @@ class Settings(BaseSettings):
     SEC_EDGAR_TIMEOUT_S: float = 15.0
     FINANCIALS_CACHE_TTL_HOURS: int = 24  # §3.2.2 cache window
 
+    # ── YFinance  (Step 5) ───────────────────────────────────────────────────
+    # YFinance is an unofficial scraper of Yahoo Finance. No API key, but
+    # Yahoo aggressively rate-limits and occasionally IP-blocks. We retry
+    # transparently and fall back gracefully (None) on hard failure — see
+    # docs/YFINANCE_INTEGRATION_NOTES.md.
+    YFINANCE_TIMEOUT_S: float = 15.0
+    YFINANCE_INFO_TTL_HOURS: int = 1     # live-ish quote: short TTL
+    YFINANCE_HISTORY_TTL_HOURS: int = 24  # daily bars: stale-ok for a day
+
     # ── External data providers ───────────────────────────────────────────────
     FMP_API_KEY: Optional[str] = None
     ALPHA_VANTAGE_KEY: Optional[str] = None

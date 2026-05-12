@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Path
 
 from app.core.database import AsyncSessionLocal
 from app.integration.sec_edgar_client import SecEdgarClient, get_sec_edgar_client
+from app.integration.yfinance_client import YFinanceClient, get_yfinance_client
 from app.schemas.valuation import ValuationReport
 from app.services.valuation_service import compute_valuation
 
@@ -26,5 +27,6 @@ async def valuation(
     symbol: str = Path(..., min_length=1, max_length=20),
     db=Depends(_db_session),
     sec_client: SecEdgarClient = Depends(get_sec_edgar_client),
+    yfinance: YFinanceClient = Depends(get_yfinance_client),
 ) -> ValuationReport:
-    return await compute_valuation(symbol, db, sec_client)
+    return await compute_valuation(symbol, db, sec_client, yfinance_client=yfinance)

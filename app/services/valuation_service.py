@@ -1,34 +1,34 @@
-"""Valuation service — Step 4.5 (§4.3 — onglet "Bien valorisée ?").
+"""Valuation service — Step 4.5 + Step 5 (§4.3 — onglet "Bien valorisée ?").
 
 Spec authority: §4.3.1-§4.3.6 — 4 methods + median aggregation + verdict.
 
-V1 implementation status (Q1 plan validated — Option A "skeleton +
-Graham only"):
+V1 implementation status (Step 5 reactivates M1 and M4 via YFinance):
 
-  ✅ Method 3 — Graham Number     (computable from SEC EDGAR alone)
-  ❌ Method 1 — Multiples vs 5y history    (needs live price + historical price/multiples)
-  ❌ Method 2 — Multiples vs sector        (needs FMP peer groups + sector medians)
-  ❌ Method 4 — Analyst target consensus   (needs YFinance or Finnhub estimates)
+  ✅ Method 1 — Multiples vs 5y history   (P/E only; P/S + EV/EBITDA deferred)
+  ❌ Method 2 — Multiples vs sector       (needs FMP peer groups + sector medians)
+  ✅ Method 3 — Graham Number             (computable from SEC EDGAR alone)
+  ✅ Method 4 — Analyst target consensus  (YFinance ``targetMedianPrice``)
 
-The 3 unavailable methods return ``MethodResult(available=False, reason=...)``
-with human-readable explanations. Their plug-in points are documented
-in-code so a future Step 4.6 / 5.x integration only fills the function
-body without touching the contract.
+When the caller doesn't pass a YFinance client (legacy code path), or
+when YFinance silently fails, M1 and M4 fall back to ``available=False``
+with the same explicit reasons as Step 4.5.
 
-See ``docs/VALUATION_PARTIAL_METHODS.md`` for the full limitations
-narrative and reintegration plan.
+See ``docs/VALUATION_PARTIAL_METHODS.md`` and
+``docs/YFINANCE_INTEGRATION_NOTES.md`` for the full narrative.
 """
 
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import SECEdgarError
 from app.integration.sec_edgar_client import SecEdgarClient
+from app.integration.yfinance_client import YFinanceClient
 from app.schemas.valuation import (
     MethodResult,
     ValuationConfidence,
@@ -36,7 +36,7 @@ from app.schemas.valuation import (
     ValuationReport,
     ValuationVerdict,
 )
-from app.services import financials_service
+from app.services import financials_service, yfinance_service
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +55,16 @@ async def compute_valuation(
     symbol: str,
     db: AsyncSession,
     sec_client: SecEdgarClient,
+    *,
+    yfinance_client: YFinanceClient | None = None,
 ) -> ValuationReport:
-    """End-to-end pipeline for the BIEN-VALORISÉE onglet (§4.3)."""
+    """End-to-end pipeline for the BIEN-VALORISÉE onglet (§4.3).
+
+    ``yfinance_client``: when provided, unlocks Method 1 (multiples 5y
+    historical, P/E flavour) and Method 4 (analyst target). On any
+    YFinance failure those methods individually fall back to
+    ``available=False`` — Graham always stays computable from SEC alone.
+    """
     sym = symbol.strip().upper()
     warnings: list[str] = []
 
@@ -92,16 +100,37 @@ async def compute_valuation(
 
     _cik, _entity_name, facts = facts_tuple
 
+    # Fetch live data from YFinance up-front (once each, then re-used by
+    # M1, M4, and the verdict aggregator). On any failure the helper
+    # returns None and the dependent method gracefully fails too.
+    info: dict[str, Any] | None = None
+    history: list[dict[str, Any]] | None = None
+    current_price: Decimal | None = None
+    if yfinance_client is not None:
+        info = await yfinance_service.get_info(sym, db, yfinance_client)
+        history = await yfinance_service.get_history(
+            sym, db, yfinance_client, period="5y", interval="1mo"
+        )
+        current_price = _extract_current_price(info)
+        if current_price is None:
+            warnings.append(
+                "YFinance: current price indisponible — verdict global "
+                "INDÉTERMINÉ même si méthodes calculables."
+            )
+    else:
+        warnings.append(
+            "YFinance client non câblé sur cette route — méthodes 1 et 4 "
+            "indisponibles. Cf. docs/VALUATION_PARTIAL_METHODS.md."
+        )
+
     # Run the 4 methods.
     methods: dict[ValuationMethodName, MethodResult] = {
-        "vs_historical_5y": _method_vs_historical_5y(facts),
+        "vs_historical_5y": _method_vs_historical_5y(facts, history, current_price),
         "vs_sector":        _method_vs_sector(facts),
         "graham_number":    _method_graham_number(facts),
-        "analyst_target":   _method_analyst_target(facts),
+        "analyst_target":   _method_analyst_target(info),
     }
 
-    # Aggregate + verdict (no current_price in V1 → ratio undefined → INDÉTERMINÉ).
-    current_price: Decimal | None = None  # V1: no live price source
     agg = _aggregate(methods, current_price)
 
     # Compose user-facing warning if Graham is the only method.
@@ -196,31 +225,139 @@ def _method_graham_number(facts: dict[str, Any]) -> MethodResult:
 # ─── Methods 1, 2, 4 — V1 scaffolds (always unavailable) ────────────────────
 
 
-def _method_vs_historical_5y(facts: dict[str, Any]) -> MethodResult:  # noqa: ARG001
+def _method_vs_historical_5y(
+    facts: dict[str, Any],
+    history: list[dict[str, Any]] | None,
+    current_price: Decimal | None,
+) -> MethodResult:
     """Multiples vs 5y historical median (§4.3.1).
 
-    V1 status: **NOT IMPLEMENTED**. Requires:
-      - Current price of the equity (no live price source integrated)
-      - 5 years of historical prices to back-compute historical P/E,
-        P/S, EV/EBITDA medians
-      - For EV/EBITDA: market cap (= price × shares) + cash + debt + EBITDA
+    V1 implementation (Step 5): P/E only. P/S and EV/EBITDA need
+    historical shares-outstanding (and EBITDA) by quarter — deferred to
+    a future step that adds shares-history extraction. Documented in
+    the response ``details``.
 
-    Plug-in point: when YFinance integration lands (likely Step 5
-    "Portfolio Analytics partie 2" or a dedicated 4.6), replace this
-    function's body with the spec snippet (lines 1069-1101) using a
-    YFinance client. The :class:`MethodResult` contract here stays
-    unchanged.
+    Algorithm:
+      1. From SEC: last 5 (up to 6) FY EPS values via extract_n_year_annuals.
+      2. From YFinance: 5y monthly closing prices.
+      3. For each bar, map to the EPS of the most recent FY whose
+         period_end is ≤ bar date.
+      4. P/E_observed = close / mapped EPS. Skip rows where EPS ≤ 0.
+      5. Historical median P/E = median of those observations.
+      6. Fair value = historical_pe_median × latest_eps.
+
+    Fails gracefully (``available=False`` + reason) when:
+      - YFinance history is missing,
+      - SEC EPS history is missing or only the latest year is present,
+      - the latest EPS is non-positive (P/E undefined),
+      - fewer than 12 valid P/E observations could be mapped.
     """
+    if history is None or not history:
+        return MethodResult(
+            available=False,
+            fair_value=None,
+            details={},
+            reason=(
+                "Méthode 1: YFinance n'a pas retourné l'historique 5 ans. "
+                "Fallback non calculable."
+            ),
+        )
+
+    eps_history = financials_service.extract_n_year_annuals(facts, "eps_diluted", n=6)
+    if len(eps_history) < 2:
+        return MethodResult(
+            available=False,
+            fair_value=None,
+            details={"eps_years_available": len(eps_history)},
+            reason=(
+                "Méthode 1: moins de 2 ans d'EPS historique SEC — médian P/E "
+                "non significatif."
+            ),
+        )
+
+    latest_eps_date, latest_eps = eps_history[0]
+    if latest_eps <= Decimal("0"):
+        return MethodResult(
+            available=False,
+            fair_value=None,
+            details={"latest_eps": str(latest_eps)},
+            reason=(
+                f"Méthode 1: EPS latest non-positif ({latest_eps}) — P/E "
+                "indéfini."
+            ),
+        )
+
+    pe_values: list[Decimal] = []
+    for bar in history:
+        try:
+            bar_date = date.fromisoformat(str(bar.get("date", "")))
+            close = Decimal(str(bar.get("close", "")))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        if close <= Decimal("0"):
+            continue
+        eps_for_bar = _eps_for_date(eps_history, bar_date)
+        if eps_for_bar is None or eps_for_bar <= Decimal("0"):
+            continue
+        pe_values.append(close / eps_for_bar)
+
+    if len(pe_values) < 12:
+        return MethodResult(
+            available=False,
+            fair_value=None,
+            details={
+                "n_pe_observations": len(pe_values),
+                "n_bars": len(history),
+                "n_eps_years": len(eps_history),
+            },
+            reason=(
+                f"Méthode 1: seulement {len(pe_values)} observations P/E "
+                "exploitables (<12 mois) — médiane non robuste."
+            ),
+        )
+
+    pe_median = _median(pe_values)
+    fair_value = pe_median * latest_eps
+
     return MethodResult(
-        available=False,
-        fair_value=None,
-        details={},
-        reason=(
-            "Méthode 1 (multiples vs historique 5 ans) requiert l'intégration "
-            "YFinance (prix marché + multiples historiques) — non disponible "
-            "en V1. Cf. docs/VALUATION_PARTIAL_METHODS.md."
-        ),
+        available=True,
+        fair_value=fair_value,
+        details={
+            "current_price": str(current_price) if current_price is not None else None,
+            "latest_eps": str(latest_eps),
+            "latest_eps_period_end": latest_eps_date.isoformat(),
+            "historical_pe_median": str(pe_median),
+            "n_pe_observations": len(pe_values),
+            "method_v1": (
+                "P/E only — P/S et EV/EBITDA reportés (shares-history et "
+                "EBITDA-history non encore intégrés)."
+            ),
+        },
+        reason=None,
     )
+
+
+def _eps_for_date(
+    eps_history: list[tuple[date, Decimal]],
+    target: date,
+) -> Decimal | None:
+    """EPS of the most recent FY whose period_end is on or before ``target``.
+
+    ``eps_history`` is sorted most-recent-first (per
+    ``financials_service.extract_n_year_annuals`` contract).
+    """
+    for period_end, eps in eps_history:
+        if period_end <= target:
+            return eps
+    return None
+
+
+def _median(values: list[Decimal]) -> Decimal:
+    s = sorted(values)
+    n = len(s)
+    if n % 2 == 1:
+        return s[n // 2]
+    return (s[n // 2 - 1] + s[n // 2]) / Decimal("2")
 
 
 def _method_vs_sector(facts: dict[str, Any]) -> MethodResult:  # noqa: ARG001
@@ -247,27 +384,103 @@ def _method_vs_sector(facts: dict[str, Any]) -> MethodResult:  # noqa: ARG001
     )
 
 
-def _method_analyst_target(facts: dict[str, Any]) -> MethodResult:  # noqa: ARG001
+def _method_analyst_target(info: dict[str, Any] | None) -> MethodResult:
     """Analyst target median (§4.3.4).
 
-    V1 status: **NOT IMPLEMENTED**. Requires:
-      - Wall Street analyst consensus 12-month target (median, low, high)
-      - Number of analysts (spec requires ≥ 5 for reliability)
+    Step 5 implementation: ``yfinance.Ticker(symbol).info["targetMedianPrice"]``
+    with reliability guard ``numberOfAnalystOpinions >= 5`` (spec §4.3.4).
 
-    Plug-in point: YFinance ``Ticker.info["targetMedianPrice"]`` or
-    Finnhub ``/stock/price-target``. Replace this function's body once
-    the integration is in place.
+    Fails gracefully when:
+      - YFinance unavailable (info is None),
+      - targetMedianPrice missing or non-positive,
+      - fewer than 5 analyst opinions.
     """
+    if not isinstance(info, dict):
+        return MethodResult(
+            available=False,
+            fair_value=None,
+            details={},
+            reason=(
+                "Méthode 4: YFinance .info indisponible — target médian analystes "
+                "non récupérable."
+            ),
+        )
+
+    raw_target = info.get("targetMedianPrice")
+    n_analysts_raw = info.get("numberOfAnalystOpinions")
+    target: Decimal | None = None
+    if raw_target is not None:
+        try:
+            target = Decimal(str(raw_target))
+        except (InvalidOperation, ValueError, TypeError):
+            target = None
+
+    n_analysts: int | None = None
+    if n_analysts_raw is not None:
+        try:
+            n_analysts = int(n_analysts_raw)
+        except (TypeError, ValueError):
+            n_analysts = None
+
+    if target is None or target <= Decimal("0"):
+        return MethodResult(
+            available=False,
+            fair_value=None,
+            details={
+                "target_median_price": str(raw_target) if raw_target is not None else None,
+                "number_of_analyst_opinions": n_analysts,
+            },
+            reason=(
+                "Méthode 4: targetMedianPrice absent ou non-positif dans YFinance "
+                ".info — consensus analystes indisponible."
+            ),
+        )
+
+    if n_analysts is None or n_analysts < 5:
+        return MethodResult(
+            available=False,
+            fair_value=None,
+            details={
+                "target_median_price": str(target),
+                "number_of_analyst_opinions": n_analysts,
+            },
+            reason=(
+                f"Méthode 4: seulement {n_analysts} analystes (spec §4.3.4 "
+                "exige ≥ 5) — consensus jugé non fiable."
+            ),
+        )
+
+    target_low = info.get("targetLowPrice")
+    target_high = info.get("targetHighPrice")
+
     return MethodResult(
-        available=False,
-        fair_value=None,
-        details={},
-        reason=(
-            "Méthode 4 (target médian analystes) requiert l'intégration YFinance "
-            "ou Finnhub (consensus analysts) — non disponible en V1. "
-            "Cf. docs/VALUATION_PARTIAL_METHODS.md."
-        ),
+        available=True,
+        fair_value=target,
+        details={
+            "target_median_price": str(target),
+            "target_low_price": str(target_low) if target_low is not None else None,
+            "target_high_price": str(target_high) if target_high is not None else None,
+            "number_of_analyst_opinions": n_analysts,
+        },
+        reason=None,
     )
+
+
+def _extract_current_price(info: dict[str, Any] | None) -> Decimal | None:
+    """Best-effort current price from YFinance .info (priority-ordered keys)."""
+    if not isinstance(info, dict):
+        return None
+    for key in ("regularMarketPrice", "currentPrice", "previousClose"):
+        raw = info.get(key)
+        if raw is None:
+            continue
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        if value > Decimal("0"):
+            return value
+    return None
 
 
 # ─── Aggregation + verdict ──────────────────────────────────────────────────

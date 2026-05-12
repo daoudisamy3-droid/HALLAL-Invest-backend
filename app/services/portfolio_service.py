@@ -33,6 +33,7 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.integration.yfinance_client import YFinanceClient
 from app.models import Position, Transaction
 from app.schemas.portfolio import (
     PortfolioSummary,
@@ -40,6 +41,7 @@ from app.schemas.portfolio import (
     TransactionCreate,
     TransactionRead,
 )
+from app.services import yfinance_service
 
 logger = logging.getLogger(__name__)
 
@@ -143,20 +145,35 @@ async def list_transactions(db: AsyncSession) -> list[TransactionRead]:
     ]
 
 
-async def list_positions(db: AsyncSession) -> list[PositionRead]:
-    """List every position (open and closed) with derived fields."""
+async def list_positions(
+    db: AsyncSession,
+    *,
+    yfinance_client: YFinanceClient | None = None,
+) -> list[PositionRead]:
+    """List every position (open and closed) with derived fields.
+
+    ``yfinance_client``: when provided, ``last_price`` is sourced from a
+    live Yahoo quote (with cache TTL 1h via ``yfinance_service``). On any
+    YFinance failure we fall back to the last transaction price — this
+    is the V1 stub behavior and remains the default when no client is
+    wired (Step 3 callers + service-level tests).
+    """
     stmt = select(Position).order_by(Position.opened_at, Position.id)
     positions = (await db.execute(stmt)).scalars().all()
 
     reports: list[PositionRead] = []
     for pos in positions:
-        reports.append(await _enrich_position(db, pos))
+        reports.append(await _enrich_position(db, pos, yfinance_client))
     return reports
 
 
-async def get_summary(db: AsyncSession) -> PortfolioSummary:
+async def get_summary(
+    db: AsyncSession,
+    *,
+    yfinance_client: YFinanceClient | None = None,
+) -> PortfolioSummary:
     """Aggregate snapshot. Cohérent avec PositionRead (USD-only V1)."""
-    positions = await list_positions(db)
+    positions = await list_positions(db, yfinance_client=yfinance_client)
 
     total_invested = sum((p.cost_basis for p in positions), ZERO)
     current_value = sum((p.current_value or ZERO for p in positions), ZERO)
@@ -242,7 +259,11 @@ async def _running_quantity(db: AsyncSession, position_id: uuid.UUID) -> Decimal
     return Decimal(str(raw if raw is not None else 0))
 
 
-async def _enrich_position(db: AsyncSession, position: Position) -> PositionRead:
+async def _enrich_position(
+    db: AsyncSession,
+    position: Position,
+    yfinance_client: YFinanceClient | None,
+) -> PositionRead:
     """Replay the position's ledger to derive qty / avg_cost / P&L.
 
     Algorithm (weighted-average cost, Q3 plan):
@@ -292,13 +313,30 @@ async def _enrich_position(db: AsyncSession, position: Position) -> PositionRead
         last_price = tx.price
 
     avg_cost: Decimal | None = None
-    current_value: Decimal | None = None
-    unrealized_pnl: Decimal | None = None
     if running_qty > ZERO:
         avg_cost = running_cost / running_qty
-        if last_price is not None:
-            current_value = running_qty * last_price
-            unrealized_pnl = current_value - running_cost
+
+    # Resolve the price + its source. Live > transaction fallback > unavailable.
+    resolved_price: Decimal | None = None
+    price_source: str = "transaction"
+    if running_qty > ZERO and yfinance_client is not None:
+        live = await _fetch_live_price(db, position.symbol, yfinance_client)
+        if live is not None:
+            resolved_price = live
+            price_source = "live"
+    if resolved_price is None:
+        # Fall back to last transaction price (the pre-step-5 stub behavior).
+        if last_price is not None and running_qty > ZERO:
+            resolved_price = last_price
+            price_source = "transaction"
+        else:
+            price_source = "unavailable"
+
+    current_value: Decimal | None = None
+    unrealized_pnl: Decimal | None = None
+    if resolved_price is not None and running_qty > ZERO:
+        current_value = running_qty * resolved_price
+        unrealized_pnl = current_value - running_cost
 
     return PositionRead(
         id=position.id,
@@ -308,9 +346,36 @@ async def _enrich_position(db: AsyncSession, position: Position) -> PositionRead
         quantity=running_qty,
         avg_cost=avg_cost,
         cost_basis=running_cost,
-        last_price=last_price if running_qty > ZERO else None,
+        last_price=resolved_price,
+        price_source=price_source,  # type: ignore[arg-type]
         current_value=current_value,
         unrealized_pnl=unrealized_pnl,
         realized_pnl=realized_pnl,
         transactions_count=len(txs),
     )
+
+
+async def _fetch_live_price(
+    db: AsyncSession,
+    symbol: str,
+    client: YFinanceClient,
+) -> Decimal | None:
+    """Pull a live quote from YFinance, return ``None`` on any failure.
+
+    The yfinance ``.info`` dict has shifted over time; we try a few price
+    keys in priority order and validate the result is a positive number.
+    """
+    info = await yfinance_service.get_info(symbol, db, client)
+    if not isinstance(info, dict):
+        return None
+    for key in ("regularMarketPrice", "currentPrice", "previousClose"):
+        raw = info.get(key)
+        if raw is None:
+            continue
+        try:
+            price = Decimal(str(raw))
+        except Exception:
+            continue
+        if price > ZERO:
+            return price
+    return None

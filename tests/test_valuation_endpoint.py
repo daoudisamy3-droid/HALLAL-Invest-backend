@@ -13,12 +13,23 @@ from httpx import ASGITransport
 from app.api.v1.endpoints.valuation import _db_session
 from app.core.config import settings
 from app.integration.sec_edgar_client import get_sec_edgar_client
+from app.integration.yfinance_client import get_yfinance_client
 from app.main import app
 from app.services import valuation_service as vs
 from tests._score_helpers import make_facts
 
 
 TEST_KEY = "test-uuid-key-0000"
+
+
+class _NoLiveYF:
+    """Stub YFinance client returning None — forces M1+M4 unavailable."""
+
+    async def get_info(self, _symbol):
+        return None
+
+    async def get_history(self, _symbol, **_kwargs):
+        return None
 
 
 @pytest_asyncio.fixture()
@@ -31,6 +42,7 @@ async def client(db, monkeypatch):
     sec_fake = AsyncMock()
     app.dependency_overrides[_db_session] = _override_db
     app.dependency_overrides[get_sec_edgar_client] = lambda: sec_fake
+    app.dependency_overrides[get_yfinance_client] = lambda: _NoLiveYF()
 
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -74,10 +86,13 @@ async def test_endpoint_returns_indetermine_with_graham_value(
     # Graham exposed in methods
     assert body["methods"]["graham_number"]["available"] is True
     assert Decimal(body["methods"]["graham_number"]["fair_value"]) == Decimal("15")
-    # The 3 unavailable methods carry a reason
+    # The 3 unavailable methods carry an explanatory reason.
+    # (Step 5: with the no-live YFinance stub, M1+M4 fall back to
+    # available=False with reasons mentioning YFinance/SEC inputs;
+    # M2 still carries the "V1 — FMP not integrated" stub reason.)
     for name in ("vs_historical_5y", "vs_sector", "analyst_target"):
         assert body["methods"][name]["available"] is False
-        assert "V1" in body["methods"][name]["reason"]
+        assert body["methods"][name]["reason"]
 
 
 @pytest.mark.integration

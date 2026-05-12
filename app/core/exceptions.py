@@ -42,3 +42,13 @@ class SECEdgarNotFound(SECEdgarError):
       - CIK has no facts (very rare; usually de-listed shell)
     Downstream verdict: "NOT_COVERED".
     """
+
+
+class YFinanceError(ExternalAPIError):
+    """YFinance (Yahoo Finance scraper) unreachable or returned unusable data.
+
+    Step 5 integration: Yahoo aggressively rate-limits and occasionally
+    IP-blocks. Callers MUST treat any ``YFinanceError`` as a non-fatal
+    fallback signal — propagate ``None``/``price_source="unavailable"``
+    to the response rather than 5xx the request.
+    """

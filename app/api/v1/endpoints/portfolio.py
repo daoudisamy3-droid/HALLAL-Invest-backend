@@ -15,6 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.database import AsyncSessionLocal
+from app.integration.yfinance_client import YFinanceClient, get_yfinance_client
 from app.schemas.portfolio import (
     PortfolioSummary,
     PositionRead,
@@ -68,10 +69,16 @@ async def delete_transaction(
 
 
 @router.get("/positions", response_model=list[PositionRead])
-async def list_positions(db=Depends(_db_session)) -> list[PositionRead]:
-    return await portfolio_service.list_positions(db)
+async def list_positions(
+    db=Depends(_db_session),
+    yfinance: YFinanceClient = Depends(get_yfinance_client),
+) -> list[PositionRead]:
+    return await portfolio_service.list_positions(db, yfinance_client=yfinance)
 
 
 @router.get("/summary", response_model=PortfolioSummary)
-async def get_summary(db=Depends(_db_session)) -> PortfolioSummary:
-    return await portfolio_service.get_summary(db)
+async def get_summary(
+    db=Depends(_db_session),
+    yfinance: YFinanceClient = Depends(get_yfinance_client),
+) -> PortfolioSummary:
+    return await portfolio_service.get_summary(db, yfinance_client=yfinance)

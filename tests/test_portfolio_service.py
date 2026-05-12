@@ -322,3 +322,57 @@ async def test_multi_position_summary_aggregates_correctly(db) -> None:
     assert s.n_positions == 3
     # 4 total transactions
     assert s.n_transactions == 4
+
+
+# ─── Step 5 — live price via YFinance client ────────────────────────────────
+
+
+class _StubYF:
+    """Configurable async stub mimicking ``YFinanceClient``."""
+
+    def __init__(self, info=None):
+        self._info = info
+
+    async def get_info(self, _symbol):
+        return self._info
+
+    async def get_history(self, _symbol, **_kwargs):
+        return None
+
+
+@pytest.mark.integration
+async def test_live_price_overrides_last_tx_price(db) -> None:
+    """When YFinance returns a usable quote, ``last_price`` is the live price
+    and ``price_source`` flips to ``"live"``."""
+    await svc.create_transaction(db, _tx(qty=10, price=100, fee=1))
+    yf = _StubYF(info={"regularMarketPrice": 250.0})
+
+    positions = await svc.list_positions(db, yfinance_client=yf)
+    assert len(positions) == 1
+    p = positions[0]
+    assert p.last_price == Decimal("250.0")
+    assert p.price_source == "live"
+    assert p.current_value == Decimal("2500.0")        # 10 × 250
+    assert p.unrealized_pnl == Decimal("1499.0")       # 2500 − 1001
+
+
+@pytest.mark.integration
+async def test_live_price_unavailable_falls_back_to_tx_price(db) -> None:
+    """YFinance returning None → ``price_source = "transaction"``, tx price kept."""
+    await svc.create_transaction(db, _tx(qty=10, price=100, fee=1))
+    yf = _StubYF(info=None)
+
+    positions = await svc.list_positions(db, yfinance_client=yf)
+    p = positions[0]
+    assert p.last_price == Decimal("100")
+    assert p.price_source == "transaction"
+
+
+@pytest.mark.integration
+async def test_no_yfinance_client_keeps_tx_price_default(db) -> None:
+    """Calling without a client → behavior identical to pre-step-5 (tx price)."""
+    await svc.create_transaction(db, _tx(qty=10, price=100, fee=1))
+    positions = await svc.list_positions(db)  # default yfinance_client=None
+    p = positions[0]
+    assert p.last_price == Decimal("100")
+    assert p.price_source == "transaction"

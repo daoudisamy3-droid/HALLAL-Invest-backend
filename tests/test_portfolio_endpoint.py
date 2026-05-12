@@ -17,10 +17,21 @@ from httpx import ASGITransport
 
 from app.api.v1.endpoints.portfolio import _db_session
 from app.core.config import settings
+from app.integration.yfinance_client import YFinanceClient, get_yfinance_client
 from app.main import app
 
 
 TEST_KEY = "test-uuid-key-0000"
+
+
+class _NoLiveYF:
+    """Stub YFinance client: every call returns None, forcing tx-price fallback."""
+
+    async def get_info(self, _symbol):
+        return None
+
+    async def get_history(self, _symbol, **_kwargs):
+        return None
 
 
 @pytest_asyncio.fixture()
@@ -31,6 +42,7 @@ async def client(db, monkeypatch):
         yield db
 
     app.dependency_overrides[_db_session] = _override_db
+    app.dependency_overrides[get_yfinance_client] = lambda: _NoLiveYF()
 
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:

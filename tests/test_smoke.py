@@ -17,11 +17,12 @@ from app.core.database import Base
 
 @pytest.mark.unit
 def test_all_models_registered() -> None:
-    """Tables registered = 5 domain tables (§11.2) + 1 technical cache table.
+    """Tables registered = 5 domain tables (§11.2) + 2 technical cache tables.
 
-    The 6th table ``financials_cache`` was added in Step 2 as a pure
-    caching layer for SEC EDGAR — it is explicitly NOT in spec §11.2
-    (which lists only domain tables). See ``alembic 005`` for the
+    ``financials_cache`` was added in Step 2 (SEC EDGAR cache), and
+    ``yfinance_cache`` in Step 5 (Yahoo Finance cache). Both are pure
+    technical caching layers, explicitly NOT in spec §11.2 (which lists
+    only domain tables). See ``alembic 005`` / ``alembic 006`` for the
     full rationale.
     """
     tables = set(Base.metadata.tables.keys())
@@ -34,6 +35,8 @@ def test_all_models_registered() -> None:
         "fair_value_history",
         # Step 2 technical caching table (not in §11.2)
         "financials_cache",
+        # Step 5 technical caching table (not in §11.2)
+        "yfinance_cache",
     }
 
 

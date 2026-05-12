@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -124,9 +124,19 @@ class PositionRead(BaseModel):
     last_price: Decimal | None = Field(
         None,
         description=(
-            "PROXY for the current market price: the most recent transaction "
-            "price on this position. NOT a real-time quote. Replaced by a "
-            "YFinance/equivalent feed in étape 5."
+            "Most recent price for the position. SEMANTIC CHANGE in step 5: "
+            "if a YFinance quote is available it is used here (live market "
+            "price); otherwise it falls back to the most recent transaction "
+            "price on this position. See ``price_source`` to disambiguate."
+        ),
+    )
+    price_source: Literal["live", "transaction", "unavailable"] = Field(
+        "transaction",
+        description=(
+            'Where ``last_price`` comes from. "live": YFinance regularMarketPrice. '
+            '"transaction": fallback to last tx price (YFinance unavailable, '
+            'or no YFinance client wired). "unavailable": no usable price at all '
+            '(position has zero transactions or YFinance + fallback both failed).'
         ),
     )
     current_value: Decimal | None = Field(
