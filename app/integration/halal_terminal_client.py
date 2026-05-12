@@ -107,8 +107,13 @@ class HalalTerminalClient:
 
         if response.status_code >= 400:
             # 401 / 403 / 422 — auth or contract issue, non-retryable
+            body_preview = response.text[:300]
+            logger.error(
+                "halal_terminal non-2xx (non-retryable) symbol=%s status=%s body=%s",
+                symbol, response.status_code, body_preview,
+            )
             raise HalalTerminalError(
-                f"halal_terminal returned {response.status_code}: {response.text[:200]}"
+                f"halal_terminal returned {response.status_code}: {body_preview}"
             )
 
         try:
@@ -119,6 +124,36 @@ class HalalTerminalClient:
         if not isinstance(data, dict):
             raise HalalTerminalError(
                 f"halal_terminal returned non-object JSON: {type(data).__name__}"
+            )
+
+        # ── Verbose audit log (Step 1.5 hotfix, Fix B) ───────────────────────
+        # Logs no auth headers, no full body unless ratios are empty (then ≤500 chars).
+        # Purpose: surface upstream-shape issues in Railway logs.
+        ratios_obj = data.get("ratios") if isinstance(data.get("ratios"), dict) else {}
+        methodologies_obj = data.get("methodologies") if isinstance(data.get("methodologies"), dict) else {}
+        bloquant_keys = (
+            "debt_to_marketcap",
+            "cash_to_marketcap",
+            "impure_revenue_ratio",
+            "interest_income_ratio",
+        )
+        ratios_present = {
+            k: isinstance(ratios_obj.get(k), (int, float))
+               and not isinstance(ratios_obj.get(k), bool)
+            for k in bloquant_keys
+        }
+        has_methodologies = len(methodologies_obj) > 0
+        body_size = len(response.text)
+
+        logger.info(
+            "halal_terminal 200 symbol=%s ratios_present=%s methodologies_present=%s body_size=%d",
+            symbol, ratios_present, has_methodologies, body_size,
+        )
+
+        if not any(ratios_present.values()):
+            logger.warning(
+                "halal_terminal returned empty/null bloquant ratios for %s — body preview: %s",
+                symbol, response.text[:500],
             )
 
         return data

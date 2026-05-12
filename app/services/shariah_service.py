@@ -122,16 +122,70 @@ _BLOCKING_CHECKS: tuple[tuple[CheckName, str, float], ...] = (
 )
 
 
+def _is_present_numeric(value: Any) -> bool:
+    """True iff `value` is a usable numeric ratio (not None, not bool, not absent)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _build_report_from_upstream(symbol: str, upstream: dict[str, Any]) -> ShariahReport:
-    """Apply §5.2 logic to the parsed upstream payload."""
+    """Apply §5.2 logic to the parsed upstream payload.
+
+    Robustness guard (Step 1.5 hotfix): §5.2 specifies
+    ``ratios.get(field, 0)`` — a permissive default that lets a *single*
+    missing ratio fall through as 0 (and therefore pass the check).
+    That default is appropriate when at least *some* ratios are
+    present. It becomes catastrophic when the *entire* payload is empty
+    or all-null: 0.0 ≤ 0.30 for every check ⇒ verdict PASS for any
+    ticker, including non-existent ones. A halal gate that emits PASS
+    on no data is worse than useless.
+
+    Guard: if NONE of the 4 bloquant ratios is present and numeric,
+    bail out with verdict ERROR. The frontend surfaces the upstream
+    failure clearly; the cache layer refuses to persist ERROR.
+    """
     raw_ratios_dict = upstream.get("ratios") or {}
+    if not isinstance(raw_ratios_dict, dict):
+        raw_ratios_dict = {}
+
+    present_count = sum(
+        1
+        for _, field, _ in _BLOCKING_CHECKS
+        if _is_present_numeric(raw_ratios_dict.get(field))
+    )
+
     ratios = ShariahRatios.model_validate(raw_ratios_dict)
+    methodology_verdicts = {
+        name: MethodologyVerdict.model_validate(payload)
+        for name, payload in (upstream.get("methodologies") or {}).items()
+    }
+
+    if present_count == 0:
+        logger.warning(
+            "shariah_service refusing PASS for symbol=%s — upstream payload has "
+            "no usable bloquant ratio (raw_ratios keys=%s)",
+            symbol,
+            sorted(raw_ratios_dict.keys()) if raw_ratios_dict else [],
+        )
+        return ShariahReport(
+            symbol=symbol,
+            verdict="ERROR",
+            source="Halal Terminal API (empty ratios payload)",
+            reason=(
+                "Halal Terminal a renvoyé une réponse sans aucun ratio exploitable "
+                "(0/4 des ratios bloquants présents). Verdict bloqué par sécurité — "
+                "la conformité ne peut pas être affirmée à partir de données absentes."
+            ),
+            raw_ratios=ratios,
+            halal_terminal_methodology_verdicts=methodology_verdicts,
+        )
 
     checks: dict[CheckName, ShariahCheck] = {}
     failed: list[CheckName] = []
 
     for check_name, field, threshold in _BLOCKING_CHECKS:
-        # §5.2: missing ratio defaults to 0 (cannot fail a check we can't compute)
+        # §5.2: missing ratio defaults to 0 (cannot fail a check we can't compute).
+        # The aggregate guard above ensures at least one ratio is real before we
+        # reach this loop, so this permissive default is safe.
         value = raw_ratios_dict.get(field, 0.0)
         if value is None:
             value = 0.0
@@ -139,11 +193,6 @@ def _build_report_from_upstream(symbol: str, upstream: dict[str, Any]) -> Sharia
         checks[check_name] = ShariahCheck(value=float(value), threshold=threshold, **{"pass": passed})
         if not passed:
             failed.append(check_name)
-
-    methodology_verdicts = {
-        name: MethodologyVerdict.model_validate(payload)
-        for name, payload in (upstream.get("methodologies") or {}).items()
-    }
 
     as_of_raw = upstream.get("as_of_date")
     as_of_parsed: date | None = None

@@ -265,3 +265,100 @@ async def test_not_covered_is_cached(db) -> None:
     assert second.verdict == "NOT_COVERED"
     assert second.cached is True
     assert mock_client.screen.await_count == 1
+
+
+# ─── Step 1.5 hotfix — Fix A guard against empty/null ratios ────────────────
+
+
+@pytest.mark.integration
+async def test_empty_ratios_object_returns_error_not_pass(db) -> None:
+    """Regression: HT returning `{"ratios": {}}` must NOT silently PASS.
+
+    This is the bug that almost shipped to production: a halal gate that
+    answers PASS when the upstream gave no usable data is catastrophic.
+    """
+    mock_client = _make_mock_client({
+        "symbol": "ZZZBIDON",
+        "overall_status": "compliant",
+        "ratios": {},   # ← empty — Fix A trap
+        "methodologies": {
+            "AAOIFI": {"status": "compliant", "failed_ratios": []},
+        },
+        "as_of_date": "2026-04-30",
+    })
+    report = await screen_with_personal_thresholds("ZZZBIDON", db, mock_client)
+
+    assert report.verdict == "ERROR"
+    assert report.failed_checks == []
+    assert "ratio exploitable" in (report.reason or "").lower() \
+        or "ratios" in (report.reason or "").lower()
+    assert report.source == "Halal Terminal API (empty ratios payload)"
+    # Methodology verdicts are preserved for downstream UI even on ERROR
+    assert "AAOIFI" in report.halal_terminal_methodology_verdicts
+
+    # ERROR is NEVER persisted (no cache poisoning)
+    rows = (await db.execute(
+        select(ScreenHistory).where(ScreenHistory.symbol == "ZZZBIDON")
+    )).scalars().all()
+    assert rows == [], "ERROR verdict must not be persisted to screen_history"
+
+
+@pytest.mark.integration
+async def test_all_null_bloquant_ratios_returns_error(db) -> None:
+    """The actual pollution shape from production: 4 bloquant ratios = null."""
+    mock_client = _make_mock_client({
+        "symbol": "NULLS",
+        "ratios": {
+            "debt_to_marketcap":     None,
+            "cash_to_marketcap":     None,
+            "impure_revenue_ratio":  None,
+            "interest_income_ratio": None,
+            "debt_to_assets":        None,
+            "receivables_to_assets": None,
+        },
+        "methodologies": {},
+        "as_of_date": "2026-04-30",
+    })
+    report = await screen_with_personal_thresholds("NULLS", db, mock_client)
+
+    assert report.verdict == "ERROR"
+    # Not persisted
+    rows = (await db.execute(
+        select(ScreenHistory).where(ScreenHistory.symbol == "NULLS")
+    )).scalars().all()
+    assert rows == []
+
+
+@pytest.mark.integration
+async def test_partial_ratios_still_passes_per_spec_5_2(db) -> None:
+    """Fix A guards on ALL ratios missing, not on partial.
+
+    Spec §5.2 explicitly uses ``ratios.get(field, 0)`` — a single missing
+    ratio defaults to 0 (passes its check). Fix A bails ONLY when 0 of 4
+    bloquant ratios are present. When 1+ are present, the spec's
+    permissive default still applies.
+    """
+    mock_client = _make_mock_client({
+        "symbol": "PARTIAL",
+        "ratios": {
+            "debt_to_marketcap":     0.02,
+            "cash_to_marketcap":     0.05,
+            "impure_revenue_ratio":  0.01,
+            # interest_income_ratio absent → spec §5.2 defaults to 0
+        },
+        "methodologies": {},
+        "as_of_date": "2026-04-30",
+    })
+    report = await screen_with_personal_thresholds("PARTIAL", db, mock_client)
+
+    assert report.verdict == "PASS"
+    assert report.checks["interest_income_ratio"].value == 0.0
+    assert report.checks["interest_income_ratio"].passed is True
+    assert report.checks["debt_to_marketcap"].value == pytest.approx(0.02)
+
+    # PASS with at least one real ratio → legitimate, gets cached
+    rows = (await db.execute(
+        select(ScreenHistory).where(ScreenHistory.symbol == "PARTIAL")
+    )).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].verdict == "PASS"
