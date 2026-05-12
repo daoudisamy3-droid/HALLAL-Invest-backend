@@ -4,6 +4,7 @@ Central configuration — all tuneable thresholds and environment variables.
 Sources : spec §5.1 (ShariahCustomThresholds), §6.3 (DCA engine), §10.1 (env vars).
 """
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
@@ -19,6 +20,30 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/hallal_invest"
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def _ensure_asyncpg_driver(cls, v: str) -> str:
+        """Normalise the URL so the app always sees the async driver prefix.
+
+        Railway (and most managed Postgres providers) injects
+        ``DATABASE_URL=postgresql://...`` by default. Our runtime stack uses
+        SQLAlchemy async (``create_async_engine``), which requires an
+        async-capable driver — ``postgresql+asyncpg://...``. Without this
+        coercion, SQLAlchemy resolves the URL to the synchronous psycopg2
+        dialect and async checkouts blow up at the first ``await
+        db.execute(...)`` (mismatch sync pool ↔ async session).
+
+        Alembic's ``env.py`` runs the reverse transformation
+        (``+asyncpg`` → ``+psycopg2``) so migrations keep working.
+
+        Idempotent: a URL already prefixed with ``postgresql+asyncpg://``
+        or any other ``postgresql+<driver>://`` form passes through
+        unchanged.
+        """
+        if v.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + v[len("postgresql://"):]
+        return v
 
     # ── Application ───────────────────────────────────────────────────────────
     APP_NAME: str = "Hallal Invest API"
