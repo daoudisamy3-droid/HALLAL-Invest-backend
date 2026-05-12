@@ -46,7 +46,15 @@ logger = logging.getLogger(__name__)
 
 # Each financial concept maps to an ordered list of US-GAAP tags to try.
 # The first tag that yields at least one FY (annual) entry wins.
+#
+# Step 2 published 11 concepts (the ones below up to ``stockholders_equity``);
+# Step 4 added the next 10 to support Altman Z'', Piotroski F-Score, Fraud
+# signals, Growth, and Capital allocation. These extra concepts are NOT
+# surfaced in the public ``FinancialsSnapshot`` schema (which stays
+# backwards-compatible); they are consumed internally by
+# ``app/services/investissable_service.py`` via ``get_facts_payload``.
 _CONCEPT_TAGS: dict[str, list[str]] = {
+    # ── Step 2 (11 concepts exposed in FinancialsSnapshot) ───────────────────
     "revenues": [
         "Revenues",
         "RevenueFromContractWithCustomerExcludingAssessedTax",
@@ -62,11 +70,32 @@ _CONCEPT_TAGS: dict[str, list[str]] = {
     "operating_cash_flow": ["NetCashProvidedByUsedInOperatingActivities"],
     "capex": ["PaymentsToAcquirePropertyPlantAndEquipment"],
     "stockholders_equity": ["StockholdersEquity"],
+    # ── Step 4 (10 additional concepts, internal only) ───────────────────────
+    "retained_earnings": ["RetainedEarningsAccumulatedDeficit"],
+    "total_liabilities": ["Liabilities"],
+    "current_assets": ["AssetsCurrent"],
+    "current_liabilities": ["LiabilitiesCurrent"],
+    "operating_income": [
+        "OperatingIncomeLoss",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    ],
+    "gross_profit": ["GrossProfit"],
+    "receivables": [
+        "AccountsReceivableNetCurrent",
+        "ReceivablesNetCurrent",
+    ],
+    "shares_outstanding": [
+        "CommonStockSharesOutstanding",
+        "EntityCommonStockSharesOutstanding",
+    ],
+    "buybacks": ["PaymentsForRepurchaseOfCommonStock"],
+    "r_and_d": ["ResearchAndDevelopmentExpense"],
 }
 
-# Most concepts are USD; EPS is reported as USD/shares.
+# Most concepts are USD; EPS is reported as USD/shares, shares as a count.
 _CONCEPT_UNITS: dict[str, str] = {
     "eps_diluted": "USD/shares",
+    "shares_outstanding": "shares",
 }
 
 
@@ -347,3 +376,133 @@ async def _persist(
             "financials_service persist failed ticker=%s err=%s", ticker, exc
         )
         await db.rollback()
+
+
+# ─── Step 4 — internal helpers for score computations ───────────────────────
+
+
+async def get_facts_payload(
+    ticker: str,
+    db: AsyncSession,
+    client: SecEdgarClient,
+) -> tuple[int, str, dict[str, Any]] | None:
+    """Internal helper for step-4 scoring.
+
+    Returns ``(cik, entity_name, raw_facts)`` for a US-listed ticker, or
+    ``None`` if the ticker is not in SEC EDGAR's universe (non-US or
+    unknown). Same cache / persistence semantics as :func:`get_financials`.
+
+    Differs from :func:`get_financials` in that it surfaces the *raw*
+    ``company_facts`` payload so the score components (Altman, Piotroski,
+    Growth…) can run multi-year extractions. Not exposed as a public
+    HTTP endpoint.
+
+    Raises:
+        SECEdgarError: on transient upstream failure (5xx, timeout).
+    """
+    tk = ticker.strip().upper()
+
+    # Cache-first path — same lookup as _read_cache, returning the raw blob.
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(
+        hours=settings.FINANCIALS_CACHE_TTL_HOURS
+    )
+    stmt = (
+        select(FinancialsCache)
+        .where(FinancialsCache.ticker == tk)
+        .where(FinancialsCache.fetched_at >= cutoff)
+        .order_by(FinancialsCache.fetched_at.desc())
+        .limit(1)
+    )
+    row = (await db.execute(stmt)).scalar_one_or_none()
+    if row is not None:
+        entity = str(row.facts_json.get("entityName", "")) if isinstance(row.facts_json, dict) else ""
+        return (row.cik, entity, row.facts_json or {})
+
+    # Cache miss — lookup CIK + fetch facts. SECEdgarError propagates.
+    cik_info = await client.lookup_cik(tk)
+    if cik_info is None:
+        return None
+
+    cik, entity_name = cik_info
+    facts = await client.get_company_facts(cik)
+    if facts is None:
+        return None
+
+    entity = str(facts.get("entityName", "")) or entity_name
+    # Persist for next call (same TTL behavior as get_financials).
+    await _persist(db, tk, cik, facts)
+    return (cik, entity, facts)
+
+
+def extract_latest_annual_value(
+    facts: dict[str, Any], concept_name: str
+) -> Decimal | None:
+    """Latest FY value for a concept (single Decimal), with multi-tag fallback.
+
+    Used by Altman (single-year balance sheet), Growth (latest endpoint of
+    CAGR window), Capital D3 (latest CapEx + R&D + Revenue), etc.
+    """
+    if concept_name not in _CONCEPT_TAGS:
+        raise KeyError(f"unknown concept_name: {concept_name}")
+    unit = _CONCEPT_UNITS.get(concept_name, "USD")
+    entry = _extract_latest_annual(facts, _CONCEPT_TAGS[concept_name], unit)
+    if entry is None:
+        return None
+    return _to_decimal(entry.get("val"))
+
+
+def extract_n_year_annuals(
+    facts: dict[str, Any],
+    concept_name: str,
+    n: int = 5,
+) -> list[tuple[date, Decimal]]:
+    """Return up to ``n`` most recent FY entries for ``concept_name``.
+
+    Returned list is sorted **most-recent-first**: ``[(period_end_y0, val_y0),
+    (period_end_y1, val_y1), …]``. Multi-tag fallback resolves to the first
+    tag that yields any FY entries; once a tag matches, only its entries
+    are used (no merging across tags). Restatements (same ``end`` across
+    multiple ``accn``) are de-duplicated to the latest ``filed`` value.
+
+    Used by Piotroski (YoY criteria → need 2 years), Growth (CAGR 3y → 4
+    years), Capital D1 (buybacks 3y → 3 years), Fraud Sig 1/2 (3 years).
+    """
+    if concept_name not in _CONCEPT_TAGS:
+        raise KeyError(f"unknown concept_name: {concept_name}")
+    unit = _CONCEPT_UNITS.get(concept_name, "USD")
+    us_gaap = facts.get("facts", {}).get("us-gaap", {})
+    if not isinstance(us_gaap, dict):
+        return []
+    for tag in _CONCEPT_TAGS[concept_name]:
+        tag_data = us_gaap.get(tag)
+        if not isinstance(tag_data, dict):
+            continue
+        units = tag_data.get("units", {})
+        if not isinstance(units, dict):
+            continue
+        entries = units.get(unit)
+        if not isinstance(entries, list):
+            continue
+        annual = [
+            e for e in entries
+            if isinstance(e, dict) and e.get("fp") == "FY" and e.get("end")
+        ]
+        if not annual:
+            continue
+        # Group by end date, pick latest filed for each (handles restatements).
+        by_end: dict[str, dict[str, Any]] = {}
+        for e in annual:
+            end = str(e.get("end", ""))
+            prev = by_end.get(end)
+            if prev is None or str(e.get("filed", "")) > str(prev.get("filed", "")):
+                by_end[end] = e
+        # Sort by end date desc, take top n.
+        sorted_entries = sorted(by_end.values(), key=lambda e: str(e["end"]), reverse=True)
+        result: list[tuple[date, Decimal]] = []
+        for e in sorted_entries[:n]:
+            d = _to_date(e.get("end"))
+            v = _to_decimal(e.get("val"))
+            if d is not None and v is not None:
+                result.append((d, v))
+        return result
+    return []

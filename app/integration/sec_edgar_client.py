@@ -8,10 +8,15 @@ Spec authority: finterminal-spec.md §3.2.2.
   - Rate limit        : 10 req/sec (no daily cap)
   - Coverage          : US-listed equities only
 
-V1 scope (cf. Q7 plan): only ``get_company_facts`` is implemented.
-``get_concept`` and ``get_recent_filings`` listed in master-prompt §9.2
-are deliberately deferred to their effective consumer (probably step 4).
-YAGNI for now.
+Scope evolution:
+  - Step 2: ``get_company_facts`` only (Q7 plan, YAGNI).
+  - Step 4: ``get_submissions`` added for the fraud-gate restatement
+    signal + SIC code (sector classification). Held in a per-process
+    in-memory cache (no DB), refreshed on container restart.
+
+``get_concept`` (single concept history endpoint) is still deferred —
+its use-case is more granular than ``get_company_facts`` which already
+returns everything we need in a single fetch.
 
 CIK lookup is in-memory (Q2 plan): the ticker→CIK map is fetched once
 on first use and held for the life of the process. Process restarts on
@@ -63,6 +68,12 @@ class SecEdgarClient:
         # CIK lookup cache (per-instance — fresh client = fresh cache for tests)
         self._cik_map: dict[str, tuple[int, str]] | None = None
         self._cik_lock = asyncio.Lock()
+        # Submissions cache (per-instance, per-CIK, in-memory).
+        # Step 4 fraud-gate Signal 3 needs the filings list; we cache it
+        # alongside the SIC code used for sector classification. Process
+        # restart on Railway flushes; that's < the spec's 24h TTL.
+        self._submissions_cache: dict[int, dict[str, Any]] = {}
+        self._submissions_lock = asyncio.Lock()
 
     # ── CIK lookup ──────────────────────────────────────────────────────────
 
@@ -103,6 +114,33 @@ class SecEdgarClient:
             logger.info("sec_edgar ticker_map loaded entries=%d", len(built))
             self._cik_map = built
             return self._cik_map
+
+    # ── Submissions (Step 4 — sector + recent filings) ─────────────────────
+
+    async def get_submissions(self, cik: int) -> dict[str, Any] | None:
+        """Fetch the SEC submissions blob for ``cik`` (filings list + metadata).
+
+        Endpoint: ``https://data.sec.gov/submissions/CIK{cik:010d}.json``.
+
+        Returns the parsed JSON dict (contains ``sicCode``,
+        ``sicDescription``, ``name``, ``filings.recent`` array, …) or
+        ``None`` on 404. Process-cached (no DB) with no TTL — relies on
+        Railway container restarts to refresh.
+
+        Used by:
+          - sector classifier (``sicCode`` → EXEMPT_SIC_RANGES check)
+          - fraud-gate Signal 3 (count of 10-K/A / 10-Q/A / NT filings)
+        """
+        if cik in self._submissions_cache:
+            return self._submissions_cache[cik]
+        async with self._submissions_lock:
+            if cik in self._submissions_cache:
+                return self._submissions_cache[cik]
+            url = f"{self._base_url}/submissions/CIK{cik:010d}.json"
+            data = await self._do_http_get(url, f"submissions cik={cik}")
+            if data is not None:
+                self._submissions_cache[cik] = data
+            return data
 
     # ── Company facts ──────────────────────────────────────────────────────
 
