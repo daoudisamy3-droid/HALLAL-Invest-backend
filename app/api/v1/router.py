@@ -4,6 +4,7 @@ from app.api.v1.endpoints import financials as financials_endpoint
 from app.api.v1.endpoints import investissable as investissable_endpoint
 from app.api.v1.endpoints import portfolio as portfolio_endpoint
 from app.api.v1.endpoints import shariah as shariah_endpoint
+from app.api.v1.endpoints import synthesis as synthesis_endpoint
 from app.api.v1.endpoints import valuation as valuation_endpoint
 from app.core.security import verify_api_key
 
@@ -29,3 +30,4 @@ api_router.include_router(financials_endpoint.router)     # GET /api/v1/financia
 api_router.include_router(portfolio_endpoint.router)      # /api/v1/portfolio/*
 api_router.include_router(investissable_endpoint.router)  # GET /api/v1/investissable/{symbol}
 api_router.include_router(valuation_endpoint.router)      # GET /api/v1/valuation/{symbol}
+api_router.include_router(synthesis_endpoint.router)      # GET /api/v1/synthesis/{symbol}
