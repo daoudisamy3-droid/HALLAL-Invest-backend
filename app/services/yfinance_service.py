@@ -32,6 +32,17 @@ logger = logging.getLogger(__name__)
 
 _KIND_INFO = "info"
 _KIND_HISTORY = "history"
+_KIND_CALENDAR = "calendar"
+_KIND_MANAGEMENT = "management"
+_KIND_HOLDERS = "holders"
+
+# Phase C TTLs (longer than info/history since these change rarely):
+#   - calendar 6h (next earnings date moves only on guidance changes)
+#   - management 24h (officers list changes once or twice a year)
+#   - holders 24h (institutional 13F is quarterly anyway)
+_CALENDAR_TTL_HOURS = 6
+_MANAGEMENT_TTL_HOURS = 24
+_HOLDERS_TTL_HOURS = 24
 
 
 # ─── Public API ─────────────────────────────────────────────────────────────
@@ -176,4 +187,64 @@ def _sanitize_for_jsonb(payload: Any) -> Any:
         return payload
     if isinstance(payload, (datetime, date)):
         return payload.isoformat()
+    return payload
+
+
+# ─── Phase C — Calendar / Management / Holders ──────────────────────────────
+
+
+async def get_calendar(
+    ticker: str, db: AsyncSession, client: YFinanceClient,
+) -> dict[str, Any] | None:
+    """Cached calendar (next earnings + dividend events + history)."""
+    tk = ticker.strip().upper()
+    cached = await _read_cache(
+        db, tk, _KIND_CALENDAR, params="", ttl_hours=_CALENDAR_TTL_HOURS,
+    )
+    if cached is not None:
+        logger.info("yfinance_service cache HIT kind=calendar ticker=%s", tk)
+        return cached if isinstance(cached, dict) else None
+    payload = await client.get_calendar(tk)
+    if payload is None:
+        logger.warning("yfinance_service MISS+fail kind=calendar ticker=%s", tk)
+        return None
+    await _persist(db, tk, _KIND_CALENDAR, params="", payload=payload)
+    return payload
+
+
+async def get_management(
+    ticker: str, db: AsyncSession, client: YFinanceClient,
+) -> list[dict[str, Any]] | None:
+    """Cached list of company officers."""
+    tk = ticker.strip().upper()
+    cached = await _read_cache(
+        db, tk, _KIND_MANAGEMENT, params="", ttl_hours=_MANAGEMENT_TTL_HOURS,
+    )
+    if cached is not None:
+        logger.info("yfinance_service cache HIT kind=management ticker=%s", tk)
+        return cached if isinstance(cached, list) else None
+    payload = await client.get_management(tk)
+    if payload is None:
+        logger.warning("yfinance_service MISS+fail kind=management ticker=%s", tk)
+        return None
+    await _persist(db, tk, _KIND_MANAGEMENT, params="", payload=payload)
+    return payload
+
+
+async def get_holders(
+    ticker: str, db: AsyncSession, client: YFinanceClient,
+) -> dict[str, Any] | None:
+    """Cached major + institutional + insider holdings."""
+    tk = ticker.strip().upper()
+    cached = await _read_cache(
+        db, tk, _KIND_HOLDERS, params="", ttl_hours=_HOLDERS_TTL_HOURS,
+    )
+    if cached is not None:
+        logger.info("yfinance_service cache HIT kind=holders ticker=%s", tk)
+        return cached if isinstance(cached, dict) else None
+    payload = await client.get_holders(tk)
+    if payload is None:
+        logger.warning("yfinance_service MISS+fail kind=holders ticker=%s", tk)
+        return None
+    await _persist(db, tk, _KIND_HOLDERS, params="", payload=payload)
     return payload

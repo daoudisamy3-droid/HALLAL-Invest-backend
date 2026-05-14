@@ -77,6 +77,36 @@ class YFinanceClient:
             self._fetch_info_sync, symbol, context_label=f"info {symbol}"
         )
 
+    async def get_calendar(self, symbol: str) -> dict[str, Any] | None:
+        """Return earnings + dividend calendar dicts.
+
+        Composes the result from ``Ticker.calendar`` (raw next-event blob)
+        + ``Ticker.earnings_history`` (last ~4 quarters EPS estimate vs
+        actual) + ``Ticker.dividends`` (timeseries of past distributions).
+        Any sub-fetch may individually be missing — the caller treats the
+        union; if every field is empty we still return ``None`` so the
+        endpoint surfaces ``available=false``.
+        """
+        return await self._with_retry(
+            self._fetch_calendar_sync, symbol, context_label=f"calendar {symbol}"
+        )
+
+    async def get_management(self, symbol: str) -> list[dict[str, Any]] | None:
+        """Return ``Ticker.info["companyOfficers"]`` — list of officer dicts
+        with name, title, age, totalPay, exercisedValue, yearBorn."""
+        return await self._with_retry(
+            self._fetch_management_sync, symbol, context_label=f"management {symbol}"
+        )
+
+    async def get_holders(self, symbol: str) -> dict[str, Any] | None:
+        """Return a composite dict: ``major_holders`` (% institutional /
+        insider), ``institutional_holders`` (top 10), ``insider_transactions``
+        (last ~10). Sub-fetches that fail are simply omitted (the endpoint
+        surfaces partial data rather than rolling back to None)."""
+        return await self._with_retry(
+            self._fetch_holders_sync, symbol, context_label=f"holders {symbol}"
+        )
+
     async def get_history(
         self,
         symbol: str,
@@ -127,6 +157,109 @@ class YFinanceClient:
             raise _RetryableYFError(f"info has no price field for {symbol!r}")
 
         return info
+
+    @staticmethod
+    def _fetch_calendar_sync(symbol: str) -> dict[str, Any] | None:
+        import yfinance as yf
+
+        ticker = yf.Ticker(symbol)
+        out: dict[str, Any] = {}
+
+        # 1. next earnings + dividend dates (yfinance .calendar)
+        try:
+            cal = ticker.calendar
+        except Exception as exc:  # noqa: BLE001
+            raise _RetryableYFError(f"calendar raised: {exc}") from exc
+        if isinstance(cal, dict) and cal:
+            # Normalise non-JSON-friendly values (Timestamp, etc.) → ISO strings.
+            for k, v in cal.items():
+                out[k] = _coerce_jsonable(v)
+
+        # 2. earnings history (EPS estimate vs actual on the last quarters)
+        try:
+            eh = ticker.earnings_history
+        except Exception:
+            eh = None
+        out["earnings_history"] = _df_to_records(eh)
+
+        # 3. dividends timeseries
+        try:
+            divs = ticker.dividends
+        except Exception:
+            divs = None
+        out["dividends"] = _series_to_records(divs, value_key="amount")
+
+        # If literally everything is empty, surface a transient None.
+        if (
+            not cal
+            and not out["earnings_history"]
+            and not out["dividends"]
+        ):
+            raise _RetryableYFError(f"calendar yielded nothing for {symbol!r}")
+
+        return out
+
+    @staticmethod
+    def _fetch_management_sync(symbol: str) -> list[dict[str, Any]] | None:
+        import yfinance as yf
+
+        ticker = yf.Ticker(symbol)
+        try:
+            info = ticker.info
+        except Exception as exc:  # noqa: BLE001
+            raise _RetryableYFError(f"info raised: {exc}") from exc
+
+        if not isinstance(info, dict):
+            raise _RetryableYFError(f"info not a dict for {symbol!r}")
+
+        officers = info.get("companyOfficers")
+        if not isinstance(officers, list) or not officers:
+            raise _RetryableYFError(f"companyOfficers empty for {symbol!r}")
+
+        normalised: list[dict[str, Any]] = []
+        for o in officers:
+            if not isinstance(o, dict):
+                continue
+            normalised.append({
+                "name":           o.get("name"),
+                "title":           o.get("title"),
+                "age":             o.get("age"),
+                "year_born":       o.get("yearBorn"),
+                "total_pay":       _coerce_jsonable(o.get("totalPay")),
+                "exercised_value": _coerce_jsonable(o.get("exercisedValue")),
+                "unexercised_value": _coerce_jsonable(o.get("unexercisedValue")),
+                "fiscal_year":     o.get("fiscalYear"),
+            })
+        return normalised
+
+    @staticmethod
+    def _fetch_holders_sync(symbol: str) -> dict[str, Any] | None:
+        import yfinance as yf
+
+        ticker = yf.Ticker(symbol)
+        out: dict[str, Any] = {}
+
+        try:
+            major = ticker.major_holders
+        except Exception:
+            major = None
+        out["major_holders"] = _df_to_records(major)
+
+        try:
+            inst = ticker.institutional_holders
+        except Exception:
+            inst = None
+        out["institutional_holders"] = _df_to_records(inst)
+
+        try:
+            insider = ticker.insider_transactions
+        except Exception:
+            insider = None
+        out["insider_transactions"] = _df_to_records(insider)
+
+        if not out["major_holders"] and not out["institutional_holders"] and not out["insider_transactions"]:
+            raise _RetryableYFError(f"holders yielded nothing for {symbol!r}")
+        return out
 
     @staticmethod
     def _fetch_history_sync(
@@ -232,3 +365,85 @@ def get_yfinance_client() -> YFinanceClient:
     if _singleton is None:
         _singleton = YFinanceClient()
     return _singleton
+
+
+# ─── Phase C helpers — JSON normalisers for pandas/Timestamp ────────────────
+
+
+def _coerce_jsonable(v: Any) -> Any:
+    """Convert pandas / numpy / datetime values to JSONable primitives."""
+    import math
+    from datetime import date, datetime
+
+    if v is None:
+        return None
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+    # pandas Timestamp / numpy scalars expose isoformat() or item().
+    if hasattr(v, "isoformat"):
+        try:
+            return v.isoformat()
+        except Exception:
+            pass
+    if hasattr(v, "item"):
+        try:
+            scalar = v.item()
+            if isinstance(scalar, float) and (math.isnan(scalar) or math.isinf(scalar)):
+                return None
+            return scalar
+        except Exception:
+            pass
+    if isinstance(v, (list, tuple)):
+        return [_coerce_jsonable(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _coerce_jsonable(x) for k, x in v.items()}
+    return v
+
+
+def _df_to_records(df: Any) -> list[dict[str, Any]]:
+    """Pandas DataFrame → list of JSONable dicts. None / empty → []."""
+    if df is None:
+        return []
+    try:
+        if df.empty:
+            return []
+    except AttributeError:
+        return []
+
+    records: list[dict[str, Any]] = []
+    try:
+        # Reset index so any datetime index becomes a column.
+        df = df.reset_index()
+        for row in df.to_dict(orient="records"):
+            records.append({str(k): _coerce_jsonable(v) for k, v in row.items()})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("yfinance _df_to_records failed err=%s", exc)
+        return []
+    return records
+
+
+def _series_to_records(series: Any, *, value_key: str = "value") -> list[dict[str, Any]]:
+    """Pandas Series → list of {date, value_key} dicts. None / empty → []."""
+    if series is None:
+        return []
+    try:
+        if series.empty:
+            return []
+    except AttributeError:
+        return []
+
+    out: list[dict[str, Any]] = []
+    try:
+        for idx, value in series.items():
+            out.append({
+                "date": _coerce_jsonable(idx),
+                value_key: _coerce_jsonable(value),
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("yfinance _series_to_records failed err=%s", exc)
+        return []
+    return out
