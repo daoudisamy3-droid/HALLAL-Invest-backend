@@ -153,3 +153,48 @@ def test_altman_handles_zero_total_assets() -> None:
     })
     result = altman.compute(facts)
     assert result.verdict == "INSUFFICIENT_DATA"
+
+
+# ─── Step 8 Phase B — calculation_detail transparency ───────────────────────
+
+
+@pytest.mark.unit
+def test_altman_calculation_detail_populated_on_success() -> None:
+    """Phase B: calculation_detail must carry formula + variables + steps + result."""
+    from app.services.altman import compute
+    from tests._score_helpers import make_facts
+
+    facts = make_facts({
+        # Build a SAFE Altman case
+        "AssetsCurrent":                          [("2024-12-31", 200)],
+        "LiabilitiesCurrent":                     [("2024-12-31", 50)],
+        "RetainedEarningsAccumulatedDeficit":     [("2024-12-31", 300)],
+        "OperatingIncomeLoss":                    [("2024-12-31", 100)],
+        "StockholdersEquity":                     [("2024-12-31", 400)],
+        "Liabilities":                            [("2024-12-31", 200)],
+        "Assets":                                 [("2024-12-31", 1000)],
+    })
+    res = compute(facts)
+    assert res.verdict == "PASS"
+    detail = res.calculation_detail
+    assert "formula" in detail and "Z''" in detail["formula"]
+    # Variables expose the 6 inputs
+    assert any("WC" in k for k in detail["variables"].keys())
+    assert any("TA" in k for k in detail["variables"].keys())
+    # Intermediates: 4 ratios
+    assert set(detail["intermediates"].keys()) == {"WC/TA", "RE/TA", "EBIT/TA", "BV/TL"}
+    # 5 computation steps (4 term multiplications + sum)
+    assert len(detail["computation_steps"]) == 5
+    assert detail["result"] is not None
+    assert "SAFE" in detail["interpretation"]
+
+
+@pytest.mark.unit
+def test_altman_calculation_detail_populated_on_missing_data() -> None:
+    """Even when INSUFFICIENT_DATA, calc_detail carries formula + threshold grid."""
+    from app.services.altman import compute
+    res = compute({"facts": {"us-gaap": {}}})
+    assert res.verdict == "INSUFFICIENT_DATA"
+    assert res.calculation_detail["formula"]
+    assert res.calculation_detail["thresholds"]
+    assert res.calculation_detail["result"] is None

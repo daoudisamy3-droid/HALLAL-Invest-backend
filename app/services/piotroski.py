@@ -45,6 +45,27 @@ from app.services import financials_service as fs
 _SHARES_TOLERANCE = Decimal("1.01")  # ≤ 1 % growth still counts as "no issuance"
 
 
+_PIOTROSKI_FORMULA = "F-Score = sum(criteria passed) ; score = (raw / N evaluated) × 100"
+_PIOTROSKI_THRESHOLDS = [
+    {"label": "STRONG",  "condition": "score ≥ 78 (i.e. ≥ 7/9)"},
+    {"label": "AVERAGE", "condition": "55 ≤ score < 78"},
+    {"label": "WEAK",    "condition": "score < 55"},
+    {"label": "N/A",     "condition": "N evaluated < 6 (insufficient YoY data)"},
+]
+
+_CRITERION_DESCRIPTIONS: dict[str, str] = {
+    "c1_net_income_positive":      "NetIncome > 0",
+    "c2_roa_positive":              "NetIncome / TotalAssets > 0",
+    "c3_ocf_positive":              "OperatingCashFlow > 0",
+    "c4_ocf_gt_ni":                 "OCF > NetIncome (earnings quality)",
+    "c5_ltd_decreased":             "ΔLongTermDebt < 0 (deleveraging)",
+    "c6_current_ratio_improved":   "ΔCurrentRatio > 0",
+    "c7_no_share_issuance":         "shares_y0 ≤ shares_y1 × 1.01 (no equity raise)",
+    "c8_gross_margin_improved":    "ΔGrossMargin > 0",
+    "c9_asset_turnover_improved":   "ΔAssetTurnover > 0",
+}
+
+
 @dataclass(frozen=True)
 class PiotroskiResult:
     score: float | None             # normalised 0-100 (None if N < 6)
@@ -52,6 +73,7 @@ class PiotroskiResult:
     n_evaluated: int                # criteria actually evaluable
     criteria: dict[str, bool | None]  # per-criterion result
     available: bool                 # True iff score is not None
+    calculation_detail: dict[str, Any] = field(default_factory=dict)
 
 
 def compute(facts: dict[str, Any]) -> PiotroskiResult:
@@ -142,6 +164,46 @@ def compute(facts: dict[str, Any]) -> PiotroskiResult:
 
     evaluated = [v for v in criteria.values() if v is not None]
     n_eval = len(evaluated)
+
+    def _build_detail(score_val: float | None, raw_val: int | None) -> dict[str, Any]:
+        # The "variables" map shows each criterion's verbal description.
+        variables = {key: _CRITERION_DESCRIPTIONS.get(key, key)
+                     for key in criteria.keys()}
+        # The "intermediates" map shows each criterion's outcome (pass / fail / na).
+        intermediates = {
+            key: ("✓ pass" if v is True else ("✗ fail" if v is False else "N/A"))
+            for key, v in criteria.items()
+        }
+        if score_val is None:
+            interp = (
+                f"Seulement {n_eval}/9 critères évaluables (< 6 minimum). "
+                "Composante Piotroski reportée à None ; les 30 % de pondération "
+                "sont redistribués sur les autres composantes."
+            )
+            steps: list[str] = [
+                f"Critères évaluables = {n_eval}",
+                "n_eval < 6 → score indisponible",
+            ]
+        else:
+            interp = (
+                f"raw = {raw_val}/{n_eval} critères passés → "
+                f"score = ({raw_val}/{n_eval}) × 100 = {score_val}"
+            )
+            steps = [
+                f"Critères évaluables : {n_eval}/9",
+                f"Critères passés     : {raw_val}/{n_eval}",
+                f"score = ({raw_val} / {n_eval}) × 100 = {score_val}",
+            ]
+        return {
+            "formula": _PIOTROSKI_FORMULA,
+            "variables": variables,
+            "intermediates": intermediates,
+            "computation_steps": steps,
+            "result": str(score_val) if score_val is not None else None,
+            "thresholds": _PIOTROSKI_THRESHOLDS,
+            "interpretation": interp,
+        }
+
     if n_eval < 6:
         return PiotroskiResult(
             score=None,
@@ -149,6 +211,7 @@ def compute(facts: dict[str, Any]) -> PiotroskiResult:
             n_evaluated=n_eval,
             criteria=criteria,
             available=False,
+            calculation_detail=_build_detail(None, None),
         )
 
     raw = sum(1 for v in evaluated if v)
@@ -161,6 +224,7 @@ def compute(facts: dict[str, Any]) -> PiotroskiResult:
         n_evaluated=n_eval,
         criteria=criteria,
         available=True,
+        calculation_detail=_build_detail(score, raw),
     )
 
 

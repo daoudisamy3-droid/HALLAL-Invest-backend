@@ -58,6 +58,16 @@ AltmanVerdict = Literal["PASS", "WARNING", "FAIL", "INSUFFICIENT_DATA"]
 AltmanZone = Literal["SAFE", "GREY", "DISTRESS", "N/A"]
 
 
+_ALTMAN_FORMULA = (
+    "Z'' = 6.56·(WC/TA) + 3.26·(RE/TA) + 6.72·(EBIT/TA) + 1.05·(BV/TL)"
+)
+_ALTMAN_THRESHOLDS = [
+    {"label": "SAFE",     "condition": "Z'' ≥ 2.6"},
+    {"label": "GREY",     "condition": "1.1 ≤ Z'' < 2.6"},
+    {"label": "DISTRESS", "condition": "Z'' < 1.1"},
+]
+
+
 @dataclass(frozen=True)
 class AltmanResult:
     verdict: AltmanVerdict
@@ -65,6 +75,7 @@ class AltmanResult:
     zone: AltmanZone
     inputs: dict[str, Decimal | None]
     reason: str | None
+    calculation_detail: dict[str, Any]
 
 
 def compute(facts: dict[str, Any]) -> AltmanResult:
@@ -90,34 +101,59 @@ def compute(facts: dict[str, Any]) -> AltmanResult:
         "total_assets": ta,
     }
 
+    variables: dict[str, str | None] = {
+        "WC (working capital = current_assets − current_liabilities)":
+            str(wc) if wc is not None else None,
+        "RE (retained_earnings)": str(re_) if re_ is not None else None,
+        "EBIT (operating_income proxy)": str(ebit) if ebit is not None else None,
+        "BV (stockholders_equity)": str(bv) if bv is not None else None,
+        "TL (total_liabilities)": str(tl) if tl is not None else None,
+        "TA (total_assets)": str(ta) if ta is not None else None,
+    }
+
     missing = [k for k, v in inputs.items() if v is None]
     if missing or ta is None or ta == Decimal("0") or tl is None or tl == Decimal("0"):
+        reason_missing = (
+            "Données SEC EDGAR insuffisantes pour calculer Z'' : "
+            f"manquant ou nul → {', '.join(missing) or 'TA / TL = 0'}."
+        )
         return AltmanResult(
             verdict="INSUFFICIENT_DATA",
             z_score=None,
             zone="N/A",
             inputs=inputs,
-            reason=(
-                "Données SEC EDGAR insuffisantes pour calculer Z'' : "
-                f"manquant ou nul → {', '.join(missing) or 'TA / TL = 0'}."
-            ),
+            reason=reason_missing,
+            calculation_detail={
+                "formula": _ALTMAN_FORMULA,
+                "variables": variables,
+                "intermediates": {},
+                "computation_steps": [],
+                "result": None,
+                "thresholds": _ALTMAN_THRESHOLDS,
+                "interpretation": reason_missing,
+            },
         )
 
     # mypy/pyright narrowing — `missing` empty implies all values present.
     assert wc is not None and re_ is not None and ebit is not None
     assert bv is not None and tl is not None and ta is not None
 
-    z = (
-        _COEF_WC * (wc / ta)
-        + _COEF_RE * (re_ / ta)
-        + _COEF_EBIT * (ebit / ta)
-        + _COEF_BV * (bv / tl)
-    )
+    r_wc = wc / ta
+    r_re = re_ / ta
+    r_ebit = ebit / ta
+    r_bv = bv / tl
+
+    term1 = _COEF_WC * r_wc
+    term2 = _COEF_RE * r_re
+    term3 = _COEF_EBIT * r_ebit
+    term4 = _COEF_BV * r_bv
+    z = term1 + term2 + term3 + term4
 
     if z >= _THRESHOLD_SAFE:
         verdict: AltmanVerdict = "PASS"
         zone: AltmanZone = "SAFE"
         reason = None
+        interp = f"Z'' = {z} ≥ 2.6 → zone SAFE → PASS"
     elif z >= _THRESHOLD_DISTRESS:
         verdict = "WARNING"
         zone = "GREY"
@@ -125,10 +161,33 @@ def compute(facts: dict[str, Any]) -> AltmanResult:
             f"Z'' = {z} dans la zone grise [1.1, 2.6) — gate passé "
             "mais à surveiller (banderole orange)."
         )
+        interp = f"Z'' = {z} ∈ [1.1, 2.6) → zone GREY → WARNING"
     else:
         verdict = "FAIL"
         zone = "DISTRESS"
         reason = f"Z'' = {z} < 1.1 — zone de distress, risque de faillite élevé."
+        interp = f"Z'' = {z} < 1.1 → zone DISTRESS → FAIL"
+
+    calculation_detail = {
+        "formula": _ALTMAN_FORMULA,
+        "variables": variables,
+        "intermediates": {
+            "WC/TA":    str(r_wc),
+            "RE/TA":    str(r_re),
+            "EBIT/TA":  str(r_ebit),
+            "BV/TL":    str(r_bv),
+        },
+        "computation_steps": [
+            f"6.56 × {r_wc} = {term1}",
+            f"3.26 × {r_re} = {term2}",
+            f"6.72 × {r_ebit} = {term3}",
+            f"1.05 × {r_bv} = {term4}",
+            f"Sum = {z}",
+        ],
+        "result": str(z),
+        "thresholds": _ALTMAN_THRESHOLDS,
+        "interpretation": interp,
+    }
 
     return AltmanResult(
         verdict=verdict,
@@ -136,4 +195,5 @@ def compute(facts: dict[str, Any]) -> AltmanResult:
         zone=zone,
         inputs=inputs,
         reason=reason,
+        calculation_detail=calculation_detail,
     )

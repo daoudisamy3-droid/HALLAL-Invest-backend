@@ -31,6 +31,25 @@ from app.services.sector import SectorInfo
 _CAGR_WINDOW_YEARS = 3  # buyback / FCF accumulation window
 
 
+_CAPITAL_D1_FORMULA = (
+    "D1 = (shares reduction 3y ≥ 5%) AND (FCF cumulé 3y ≥ buybacks cumulés 3y) "
+    "→ score 100/60/60/20"
+)
+_CAPITAL_D1_THRESHOLDS = [
+    {"label": "100", "condition": "reduction ≥ 5% AND FCF couvre buybacks"},
+    {"label": "60",  "condition": "reduction ≥ 5% mais financée par dette"},
+    {"label": "60",  "condition": "neutre (0 ≤ reduction < 5%)"},
+    {"label": "20",  "condition": "dilution (reduction < 0)"},
+]
+
+_CAPITAL_D3_FORMULA = "D3 = (CapEx + R&D) / Revenue (V1 absolute fallback)"
+_CAPITAL_D3_THRESHOLDS = [
+    {"label": "80", "condition": "5% ≤ intensity ≤ 30% (zone normale)"},
+    {"label": "50", "condition": "intensity < 5% (peu d'investissement)"},
+    {"label": "60", "condition": "intensity > 30% (très intensif)"},
+]
+
+
 @dataclass(frozen=True)
 class CapitalAllocationResult:
     score: float | None
@@ -114,6 +133,19 @@ def _compute_d1(facts: dict[str, Any]) -> tuple[int | None, dict[str, Any]]:
 
     fcf_covers_buybacks = fcf_total >= buyback_total
 
+    if reduction_pct >= Decimal("0.05") and fcf_covers_buybacks:
+        score = 100
+        interp = "Rachat ≥ 5% sur 3 ans + FCF couvre les buybacks → 100/100"
+    elif reduction_pct >= Decimal("0.05") and not fcf_covers_buybacks:
+        score = 60
+        interp = "Rachat ≥ 5% sur 3 ans MAIS financé par dette (FCF insuffisant) → 60/100"
+    elif reduction_pct >= Decimal("0"):
+        score = 60
+        interp = f"Réduction modérée ({reduction_pct * 100:.2f}%) → 60/100 (neutre)"
+    else:
+        score = 20
+        interp = f"Dilution ({reduction_pct * 100:.2f}%) → 20/100 (signal négatif)"
+
     details: dict[str, Any] = {
         "shares_now": str(shares_now),
         "shares_3y_ago": str(shares_3y_ago),
@@ -121,15 +153,32 @@ def _compute_d1(facts: dict[str, Any]) -> tuple[int | None, dict[str, Any]]:
         "fcf_3y_total": str(fcf_total),
         "buyback_3y_total": str(buyback_total),
         "fcf_covers_buybacks": fcf_covers_buybacks,
+        "calculation_detail": {
+            "formula": _CAPITAL_D1_FORMULA,
+            "variables": {
+                "shares_now":      str(shares_now),
+                "shares_3y_ago":   str(shares_3y_ago),
+                "Σ FCF 3y":         str(fcf_total),
+                "Σ buybacks 3y":    str(buyback_total),
+            },
+            "intermediates": {
+                "reduction_pct":        f"{reduction_pct * 100:.2f}%",
+                "fcf_covers_buybacks":  "✓ oui" if fcf_covers_buybacks else "✗ non",
+            },
+            "computation_steps": [
+                f"reduction = ({shares_3y_ago} − {shares_now}) / {shares_3y_ago} = {reduction_pct}",
+                f"Σ FCF 3y = {fcf_total}",
+                f"Σ buybacks 3y = {buyback_total}",
+                f"FCF couvre buybacks ? {fcf_covers_buybacks}",
+                f"→ score = {score}",
+            ],
+            "result": str(score),
+            "thresholds": _CAPITAL_D1_THRESHOLDS,
+            "interpretation": interp,
+        },
     }
 
-    if reduction_pct >= Decimal("0.05") and fcf_covers_buybacks:
-        return 100, details
-    if reduction_pct >= Decimal("0.05") and not fcf_covers_buybacks:
-        return 60, details
-    if reduction_pct >= Decimal("0"):
-        return 60, details
-    return 20, details
+    return score, details
 
 
 # ─── D3 — Investment intensity ───────────────────────────────────────────────
@@ -161,16 +210,41 @@ def _compute_d3(
     investment = capex + rd
     intensity = investment / revenue
 
+    if Decimal("0.05") <= intensity <= Decimal("0.30"):
+        score = 80
+        interp = f"intensity = {intensity * 100:.2f}% ∈ [5%, 30%] → zone normale → 80/100"
+    elif intensity < Decimal("0.05"):
+        score = 50
+        interp = f"intensity = {intensity * 100:.2f}% < 5% → peu d'investissement → 50/100"
+    else:
+        score = 60
+        interp = f"intensity = {intensity * 100:.2f}% > 30% → très intensif → 60/100"
+
     details: dict[str, Any] = {
         "capex": str(capex),
         "r_and_d": str(rd),
         "revenue": str(revenue),
         "intensity_pct": str(intensity),
-        "mode": "absolute_fallback",  # V1: no sector median
+        "mode": "absolute_fallback",
+        "calculation_detail": {
+            "formula": _CAPITAL_D3_FORMULA,
+            "variables": {
+                "CapEx":   str(capex),
+                "R&D":     str(rd),
+                "Revenue": str(revenue),
+            },
+            "intermediates": {
+                "investment (CapEx + R&D)": str(investment),
+                "intensity":                  f"{intensity * 100:.2f}%",
+            },
+            "computation_steps": [
+                f"investment = {capex} + {rd} = {investment}",
+                f"intensity = {investment} / {revenue} = {intensity}",
+                f"→ score = {score}",
+            ],
+            "result": str(score),
+            "thresholds": _CAPITAL_D3_THRESHOLDS,
+            "interpretation": interp,
+        },
     }
-
-    if Decimal("0.05") <= intensity <= Decimal("0.30"):
-        return 80, details
-    if intensity < Decimal("0.05"):
-        return 50, details
-    return 60, details
+    return score, details

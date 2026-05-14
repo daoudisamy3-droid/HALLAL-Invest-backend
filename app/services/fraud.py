@@ -23,7 +23,7 @@ fallbacks; Q5 plan: get_recent_filings now implemented for Signal 3):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Literal
@@ -43,11 +43,32 @@ _RESTATEMENTS_LOOKBACK_YEARS = 3
 FraudVerdict = Literal["PASS", "FAIL"]
 
 
+_S1_FORMULA = "FCF/NI = sum(FCF_y0..y-2) / sum(NI_y0..y-2)  with FCF = OCF − CapEx"
+_S1_THRESHOLDS = [
+    {"label": "clean (signal négatif)", "condition": "ratio ≥ 0.5"},
+    {"label": "alerte fraude",          "condition": "ratio < 0.5"},
+    {"label": "exempt (capital-intensive)", "condition": "SIC in EXEMPT_SIC_RANGES → toujours clean"},
+]
+
+_S2_FORMULA = "Receivables anomaly = CAGR2y(Receivables) / CAGR2y(Revenue)"
+_S2_THRESHOLDS = [
+    {"label": "clean", "condition": "ratio ≤ 2.0 (créances suivent les revenus)"},
+    {"label": "alerte fraude", "condition": "ratio > 2.0 (créances accélèrent vs revenus)"},
+]
+
+_S3_FORMULA = "count(form in {10-K/A, 10-Q/A, NT 10-K, NT 10-Q} sur 3 ans glissants)"
+_S3_THRESHOLDS = [
+    {"label": "clean", "condition": "count < 3"},
+    {"label": "alerte fraude", "condition": "count ≥ 3"},
+]
+
+
 @dataclass(frozen=True)
 class SignalResult:
     """One sub-signal outcome."""
     positive: bool | None     # True = fraud-positive, False = clean, None = N/A
     details: dict[str, Any]
+    calculation_detail: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -105,6 +126,15 @@ def _signal_fcf_quality(
         return SignalResult(
             positive=None,
             details={"reason": "insufficient OCF or NI history (< 3 FY entries)"},
+            calculation_detail={
+                "formula": _S1_FORMULA,
+                "variables": {"n_OCF_years": len(ocf_series), "n_NI_years": len(ni_series)},
+                "intermediates": {},
+                "computation_steps": ["Historique < 3 ans → signal indéterminé"],
+                "result": None,
+                "thresholds": _S1_THRESHOLDS,
+                "interpretation": "Données insuffisantes pour évaluer S1 (3 ans d'OCF + NI requis).",
+            },
         )
 
     capex_by_end = {d: v for d, v in capex_series}
@@ -114,14 +144,29 @@ def _signal_fcf_quality(
     )
     ni_total = sum((v for _, v in ni_series), Decimal("0"))
 
+    base_vars = {
+        "Σ OCF 3y":   str(sum((v for _, v in ocf_series), Decimal("0"))),
+        "Σ CapEx 3y": str(sum((v for _, v in capex_series), Decimal("0"))),
+        "Σ FCF 3y":    str(fcf_total),
+        "Σ NI 3y":     str(ni_total),
+    }
+
     if ni_total <= 0:
-        # 3-year NI is negative or zero → ratio undefined / not meaningful.
         return SignalResult(
             positive=False,
             details={
                 "reason": "3y net income ≤ 0 — FCF/NI ratio undefined; treated as non-positive signal",
                 "fcf_3y_total": str(fcf_total),
                 "ni_3y_total": str(ni_total),
+            },
+            calculation_detail={
+                "formula": _S1_FORMULA,
+                "variables": base_vars,
+                "intermediates": {"ratio_3y": "undefined (NI ≤ 0)"},
+                "computation_steps": [f"NI total 3y = {ni_total} ≤ 0 → ratio non significatif"],
+                "result": None,
+                "thresholds": _S1_THRESHOLDS,
+                "interpretation": "NI 3y total ≤ 0 → signal traité comme clean par défaut.",
             },
         )
 
@@ -135,6 +180,21 @@ def _signal_fcf_quality(
                 "threshold": str(_FCF_NI_3Y_THRESHOLD),
                 "exempt_reason": sector_info.exempt_reason,
             },
+            calculation_detail={
+                "formula": _S1_FORMULA,
+                "variables": base_vars,
+                "intermediates": {"ratio_3y": str(ratio)},
+                "computation_steps": [
+                    f"ratio = {fcf_total} / {ni_total} = {ratio}",
+                    f"Secteur exempté ({sector_info.exempt_reason}) → signal clean d'office",
+                ],
+                "result": str(ratio),
+                "thresholds": _S1_THRESHOLDS,
+                "interpretation": (
+                    f"Secteur capital-intensive (SIC {sector_info.sic_code}) — "
+                    "le seuil absolu 0.5 ne s'applique pas, signal forcé clean."
+                ),
+            },
         )
 
     is_alert = ratio < _FCF_NI_3Y_THRESHOLD
@@ -144,6 +204,21 @@ def _signal_fcf_quality(
             "ratio_3y": str(ratio),
             "threshold": str(_FCF_NI_3Y_THRESHOLD),
             "mode": "absolute_fallback",
+        },
+        calculation_detail={
+            "formula": _S1_FORMULA,
+            "variables": base_vars,
+            "intermediates": {"ratio_3y": str(ratio)},
+            "computation_steps": [
+                f"ratio = {fcf_total} / {ni_total} = {ratio}",
+                f"Seuil = {_FCF_NI_3Y_THRESHOLD} → {'alerte (< seuil)' if is_alert else 'clean (≥ seuil)'}",
+            ],
+            "result": str(ratio),
+            "thresholds": _S1_THRESHOLDS,
+            "interpretation": (
+                f"ratio FCF/NI 3y = {ratio} "
+                f"{'< 0.5 → alerte fraude' if is_alert else '≥ 0.5 → clean'}"
+            ),
         },
     )
 
@@ -163,15 +238,43 @@ def _signal_receivables_anomaly(facts: dict[str, Any]) -> SignalResult:
         return SignalResult(
             positive=None,
             details={"reason": "insufficient receivables or revenue history (< 3 FY entries)"},
+            calculation_detail={
+                "formula": _S2_FORMULA,
+                "variables": {"n_receivables": len(rcv_series), "n_revenue": len(rev_series)},
+                "intermediates": {},
+                "computation_steps": ["Historique < 3 ans (CAGR 2y requiert y-2, y-1, y0)"],
+                "result": None,
+                "thresholds": _S2_THRESHOLDS,
+                "interpretation": "Données insuffisantes pour évaluer S2.",
+            },
         )
 
     rcv_cagr = _cagr(rcv_series[2][1], rcv_series[0][1], 2)
     rev_cagr = _cagr(rev_series[2][1], rev_series[0][1], 2)
 
+    base_vars = {
+        "Receivables y-2": str(rcv_series[2][1]),
+        "Receivables y0":   str(rcv_series[0][1]),
+        "Revenue y-2":      str(rev_series[2][1]),
+        "Revenue y0":       str(rev_series[0][1]),
+    }
+
     if rev_cagr is None or rcv_cagr is None:
         return SignalResult(
             positive=None,
             details={"reason": "CAGR undefined (sign change or zero start)"},
+            calculation_detail={
+                "formula": _S2_FORMULA,
+                "variables": base_vars,
+                "intermediates": {
+                    "Receivables CAGR 2y": str(rcv_cagr) if rcv_cagr else "undefined",
+                    "Revenue CAGR 2y":      str(rev_cagr) if rev_cagr else "undefined",
+                },
+                "computation_steps": ["CAGR indéfini (changement de signe ou start nul)"],
+                "result": None,
+                "thresholds": _S2_THRESHOLDS,
+                "interpretation": "CAGR(s) indéfini(s) — signal non significatif.",
+            },
         )
 
     if rev_cagr <= 0:
@@ -181,6 +284,20 @@ def _signal_receivables_anomaly(facts: dict[str, Any]) -> SignalResult:
                 "reason": "Revenue CAGR ≤ 0 — anomaly check not meaningful in decline",
                 "receivables_cagr_2y": str(rcv_cagr),
                 "revenue_cagr_2y": str(rev_cagr),
+            },
+            calculation_detail={
+                "formula": _S2_FORMULA,
+                "variables": base_vars,
+                "intermediates": {
+                    "Receivables CAGR 2y": str(rcv_cagr),
+                    "Revenue CAGR 2y":      str(rev_cagr),
+                },
+                "computation_steps": [
+                    f"Revenue CAGR 2y = {rev_cagr} ≤ 0 → check non significatif en déclin"
+                ],
+                "result": None,
+                "thresholds": _S2_THRESHOLDS,
+                "interpretation": "Revenus en déclin → signal forcé clean (anomaly non testable).",
             },
         )
 
@@ -195,6 +312,28 @@ def _signal_receivables_anomaly(facts: dict[str, Any]) -> SignalResult:
             "threshold": str(_RECEIVABLES_GROWTH_RATIO_THRESHOLD),
             "mode": "absolute_fallback",
         },
+        calculation_detail={
+            "formula": _S2_FORMULA,
+            "variables": base_vars,
+            "intermediates": {
+                "Receivables CAGR 2y": str(rcv_cagr),
+                "Revenue CAGR 2y":      str(rev_cagr),
+                "ratio = rcv/rev":      str(ratio),
+            },
+            "computation_steps": [
+                f"Receivables CAGR 2y = {rcv_cagr}",
+                f"Revenue CAGR 2y      = {rev_cagr}",
+                f"ratio = {rcv_cagr} / {rev_cagr} = {ratio}",
+                f"Seuil = {_RECEIVABLES_GROWTH_RATIO_THRESHOLD} → "
+                f"{'alerte (>)' if is_alert else 'clean (≤)'}",
+            ],
+            "result": str(ratio),
+            "thresholds": _S2_THRESHOLDS,
+            "interpretation": (
+                f"ratio = {ratio} "
+                f"{'> 2.0 → créances accélèrent vs revenus (alerte fraude)' if is_alert else '≤ 2.0 → clean'}"
+            ),
+        },
     )
 
 
@@ -203,26 +342,32 @@ def _signal_receivables_anomaly(facts: dict[str, Any]) -> SignalResult:
 
 def _signal_restatements(submissions: dict[str, Any] | None) -> SignalResult:
     """Count 10-K/A, 10-Q/A, NT 10-K, NT 10-Q over the past 3 years."""
-    if not isinstance(submissions, dict):
+    def _no_data(reason: str) -> SignalResult:
         return SignalResult(
             positive=None,
-            details={"reason": "SEC submissions unavailable (non-US or fetch failed)"},
+            details={"reason": reason},
+            calculation_detail={
+                "formula": _S3_FORMULA,
+                "variables": {},
+                "intermediates": {},
+                "computation_steps": [reason],
+                "result": None,
+                "thresholds": _S3_THRESHOLDS,
+                "interpretation": "Données SEC submissions indisponibles — signal indéterminé.",
+            },
         )
+
+    if not isinstance(submissions, dict):
+        return _no_data("SEC submissions unavailable (non-US or fetch failed)")
 
     recent = submissions.get("filings", {}).get("recent")
     if not isinstance(recent, dict):
-        return SignalResult(
-            positive=None,
-            details={"reason": "submissions payload missing 'filings.recent' object"},
-        )
+        return _no_data("submissions payload missing 'filings.recent' object")
 
     forms_raw = recent.get("form")
     dates_raw = recent.get("filingDate")
     if not isinstance(forms_raw, list) or not isinstance(dates_raw, list):
-        return SignalResult(
-            positive=None,
-            details={"reason": "submissions 'form' or 'filingDate' arrays missing"},
-        )
+        return _no_data("submissions 'form' or 'filingDate' arrays missing")
 
     cutoff = date.today() - timedelta(days=365 * _RESTATEMENTS_LOOKBACK_YEARS)
     count = 0
@@ -245,6 +390,27 @@ def _signal_restatements(submissions: dict[str, Any] | None) -> SignalResult:
             "count": count,
             "threshold": _RESTATEMENTS_THRESHOLD,
             "lookback_years": _RESTATEMENTS_LOOKBACK_YEARS,
-            "matching_filings": matching_forms[:10],  # cap for log-friendliness
+            "matching_filings": matching_forms[:10],
+        },
+        calculation_detail={
+            "formula": _S3_FORMULA,
+            "variables": {
+                "lookback_years":       str(_RESTATEMENTS_LOOKBACK_YEARS),
+                "restatement_forms":    ", ".join(sorted(_RESTATEMENT_FORMS)),
+                "threshold":            str(_RESTATEMENTS_THRESHOLD),
+            },
+            "intermediates": {"count": str(count)},
+            "computation_steps": [
+                f"Fenêtre = 3 ans depuis {cutoff.isoformat()}",
+                f"Formulaires recherchés = {sorted(_RESTATEMENT_FORMS)}",
+                f"Décompte = {count}",
+                f"Seuil = {_RESTATEMENTS_THRESHOLD} → {'alerte' if is_alert else 'clean'}",
+            ],
+            "result": str(count),
+            "thresholds": _S3_THRESHOLDS,
+            "interpretation": (
+                f"{count} restatement(s)/late-filing(s) sur 3 ans "
+                f"{'≥ 3 → alerte fraude' if is_alert else '< 3 → clean'}"
+            ),
         },
     )

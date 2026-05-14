@@ -170,6 +170,7 @@ async def compute_investissable(
             "zone": altman_result.zone,
             "inputs": {k: str(v) if v is not None else None for k, v in altman_result.inputs.items()},
             "formula": "Z''",
+            "calculation_detail": altman_result.calculation_detail,
         },
         reason=altman_result.reason,
     )
@@ -211,6 +212,7 @@ async def compute_investissable(
                 name: {
                     "positive": s.positive,
                     **{k: v for k, v in s.details.items()},
+                    "calculation_detail": s.calculation_detail,
                 }
                 for name, s in fraud_result.signals.items()
             },
@@ -278,6 +280,7 @@ def _compute_quality(
                        if piotroski_res.raw is not None else None,
                 "n_evaluated": piotroski_res.n_evaluated,
                 "criteria": piotroski_res.criteria,
+                "calculation_detail": piotroski_res.calculation_detail,
             },
         ),
         "growth": QualityComponent(
@@ -287,6 +290,7 @@ def _compute_quality(
                 "cagrs_3y": {k: str(v) if v is not None else None
                              for k, v in growth_res.raw_cagrs.items()},
                 "sub_scores": growth_res.sub_scores,
+                "calculation_detail": growth_res.calculation_detail,
             },
         ),
         "smart_money": QualityComponent(

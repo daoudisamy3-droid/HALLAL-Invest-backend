@@ -35,7 +35,7 @@ return ``None`` for that metric and let the aggregator skip it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, getcontext
 from typing import Any
@@ -56,12 +56,27 @@ _TIERS: tuple[tuple[Decimal, int], ...] = (
 )
 
 
+_GROWTH_FORMULA = (
+    "CAGR_3y = (end / start)^(1/3) − 1 ; score = moyenne des sous-scores "
+    "(Revenue, EPS, FCF) mappés sur le barème §4.2.2"
+)
+_GROWTH_THRESHOLDS = [
+    {"label": "Excellent (100)", "condition": "CAGR ≥ 15%"},
+    {"label": "Très bon (80)",    "condition": "10% ≤ CAGR < 15%"},
+    {"label": "Bon (60)",         "condition": "5% ≤ CAGR < 10%"},
+    {"label": "Neutre (40)",      "condition": "0% ≤ CAGR < 5%"},
+    {"label": "Décroissant (20)", "condition": "-5% ≤ CAGR < 0%"},
+    {"label": "Recul fort (0)",   "condition": "CAGR < -5%"},
+]
+
+
 @dataclass(frozen=True)
 class GrowthResult:
     score: float | None              # mean of available sub-scores, None if 0 available
     raw_cagrs: dict[str, Decimal | None]
     sub_scores: dict[str, int | None]
     available: bool
+    calculation_detail: dict[str, Any] = field(default_factory=dict)
 
 
 def compute(facts: dict[str, Any]) -> GrowthResult:
@@ -78,13 +93,56 @@ def compute(facts: dict[str, Any]) -> GrowthResult:
     sub = {k: _score_cagr(v) for k, v in raw.items()}
 
     available_sub_scores = [s for s in sub.values() if s is not None]
+    detail_variables = {
+        "Revenue CAGR 3y": (f"{rev_cagr * 100:.2f}%" if rev_cagr is not None else None),
+        "EPS CAGR 3y":      (f"{eps_cagr * 100:.2f}%" if eps_cagr is not None else None),
+        "FCF CAGR 3y":      (f"{fcf_cagr * 100:.2f}%" if fcf_cagr is not None else None),
+    }
+    detail_intermediates = {
+        "Revenue sub-score": str(sub["revenue_cagr_3y"]) if sub["revenue_cagr_3y"] is not None else "N/A",
+        "EPS sub-score":      str(sub["eps_cagr_3y"]) if sub["eps_cagr_3y"] is not None else "N/A",
+        "FCF sub-score":      str(sub["fcf_cagr_3y"]) if sub["fcf_cagr_3y"] is not None else "N/A",
+    }
+
     if not available_sub_scores:
         return GrowthResult(
-            score=None, raw_cagrs=raw, sub_scores=sub, available=False
+            score=None, raw_cagrs=raw, sub_scores=sub, available=False,
+            calculation_detail={
+                "formula": _GROWTH_FORMULA,
+                "variables": detail_variables,
+                "intermediates": detail_intermediates,
+                "computation_steps": [
+                    "Aucun sous-CAGR évaluable (4 ans d'historique requis par métrique).",
+                ],
+                "result": None,
+                "thresholds": _GROWTH_THRESHOLDS,
+                "interpretation": (
+                    "Composante Growth indisponible — pondération 25 % "
+                    "redistribuée sur les autres composantes."
+                ),
+            },
         )
 
     score = round(sum(available_sub_scores) / len(available_sub_scores), 1)
-    return GrowthResult(score=score, raw_cagrs=raw, sub_scores=sub, available=True)
+    steps = [
+        f"Sous-scores disponibles : {available_sub_scores}",
+        f"score = mean({available_sub_scores}) = {score}",
+    ]
+    return GrowthResult(
+        score=score, raw_cagrs=raw, sub_scores=sub, available=True,
+        calculation_detail={
+            "formula": _GROWTH_FORMULA,
+            "variables": detail_variables,
+            "intermediates": detail_intermediates,
+            "computation_steps": steps,
+            "result": str(score),
+            "thresholds": _GROWTH_THRESHOLDS,
+            "interpretation": (
+                f"Moyenne des {len(available_sub_scores)} sous-scores "
+                f"disponibles = {score}/100"
+            ),
+        },
+    )
 
 
 # ─── Internals ──────────────────────────────────────────────────────────────

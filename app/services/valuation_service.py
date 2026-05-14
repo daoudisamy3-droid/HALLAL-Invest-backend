@@ -213,6 +213,31 @@ def _method_graham_number(facts: dict[str, Any]) -> MethodResult:
             "eps": str(eps),
             "bvps": str(bvps),
             "formula": "sqrt(22.5 × EPS × BVPS)",
+            "calculation_detail": {
+                "formula": "Graham Number = sqrt(22.5 × EPS × BVPS)",
+                "variables": {
+                    "EPS (diluted, latest FY)":           str(eps),
+                    "Equity (StockholdersEquity)":         str(equity),
+                    "Shares (CommonStockSharesOutstanding)": str(shares),
+                    "BVPS = Equity / Shares":              str(bvps),
+                },
+                "intermediates": {
+                    "22.5 × EPS × BVPS": str(inside),
+                },
+                "computation_steps": [
+                    f"BVPS = {equity} / {shares} = {bvps}",
+                    f"22.5 × {eps} × {bvps} = {inside}",
+                    f"Graham = sqrt({inside}) = {graham}",
+                ],
+                "result": str(graham),
+                "thresholds": [
+                    {"label": "fair_value", "condition": "= Graham number (conservatif, growth stocks systématiquement bas)"},
+                ],
+                "interpretation": (
+                    f"Graham fair value = {graham} (conservatif — référence pour value stocks, "
+                    "sous-évalue les growth stocks)."
+                ),
+            },
             "note": (
                 "Graham Number is conservative; for growth stocks (AAPL, MSFT…) "
                 "it will systematically sit below market price — that's expected."
@@ -328,6 +353,37 @@ def _method_vs_historical_5y(
             "latest_eps_period_end": latest_eps_date.isoformat(),
             "historical_pe_median": str(pe_median),
             "n_pe_observations": len(pe_values),
+            "calculation_detail": {
+                "formula": (
+                    "M1 fair value = historical_P/E_median × latest_EPS"
+                    "  (P/E_t = close_t / EPS_FY(t))"
+                ),
+                "variables": {
+                    "latest EPS":                str(latest_eps),
+                    "latest EPS period_end":     latest_eps_date.isoformat(),
+                    "n bars 5y monthly":          str(len(history)),
+                    "n EPS years":                str(len(eps_history)),
+                    "current price (YFinance)":   str(current_price) if current_price else None,
+                },
+                "intermediates": {
+                    "P/E observations exploitables": str(len(pe_values)),
+                    "historical P/E median":         str(pe_median),
+                },
+                "computation_steps": [
+                    f"Construire la série P/E_t = close_t / EPS_FY(t) sur {len(history)} barres mensuelles 5y",
+                    f"Filtrer EPS > 0 → {len(pe_values)} observations exploitables",
+                    f"median(P/E) = {pe_median}",
+                    f"fair value = {pe_median} × {latest_eps} = {fair_value}",
+                ],
+                "result": str(fair_value),
+                "thresholds": [
+                    {"label": "fair_value", "condition": "= médiane P/E historique × EPS courant"},
+                ],
+                "interpretation": (
+                    f"Si current_price ≈ {fair_value}, le multiple P/E est à sa "
+                    "médiane 5y. Au-dessus = surévalué relativement à son propre passé."
+                ),
+            },
             "method_v1": (
                 "P/E only — P/S et EV/EBITDA reportés (shares-history et "
                 "EBITDA-history non encore intégrés)."
@@ -461,6 +517,28 @@ def _method_analyst_target(info: dict[str, Any] | None) -> MethodResult:
             "target_low_price": str(target_low) if target_low is not None else None,
             "target_high_price": str(target_high) if target_high is not None else None,
             "number_of_analyst_opinions": n_analysts,
+            "calculation_detail": {
+                "formula": "M4 fair value = targetMedianPrice (consensus analystes Wall Street)",
+                "variables": {
+                    "targetMedianPrice (YFinance)":     str(target),
+                    "targetLowPrice":                    str(target_low) if target_low is not None else None,
+                    "targetHighPrice":                   str(target_high) if target_high is not None else None,
+                    "numberOfAnalystOpinions":           str(n_analysts),
+                },
+                "intermediates": {},
+                "computation_steps": [
+                    f"Consensus analystes ({n_analysts} avis) — médiane retenue : {target}",
+                ],
+                "result": str(target),
+                "thresholds": [
+                    {"label": "fiable",      "condition": "numberOfAnalystOpinions ≥ 5"},
+                    {"label": "non fiable",  "condition": "numberOfAnalystOpinions < 5 → méthode reportée"},
+                ],
+                "interpretation": (
+                    f"{n_analysts} analystes ≥ 5 (seuil spec §4.3.4) → "
+                    f"target médian retenu comme fair value = {target}."
+                ),
+            },
         },
         reason=None,
     )
