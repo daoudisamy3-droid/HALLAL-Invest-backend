@@ -6,22 +6,36 @@ verdicts into one ``overall_verdict``. Always returns a
 ``SynthesisReport``, never raises — the endpoint is 200 even when 1 to
 3 layers blow up.
 
+Per-layer DB session (Step 7.1 hotfix)
+--------------------------------------
+SQLAlchemy ``AsyncSession`` is NOT concurrent-safe — sharing one
+session across ``asyncio.gather`` branches triggers
+``InterfaceError: another operation is in progress`` on the asyncpg
+backend. The slowest branch (typically valuation, which hits 3 cache
+tables) loses the race and surfaces as ``available=false`` /
+``verdict="ERROR"``.
+
+Fix: each gather branch opens its own session from a sessionmaker.
+Default sessionmaker is ``AsyncSessionLocal`` (production); tests
+override via the ``session_factory`` parameter.
+
 Note on duplicate Shariah call: ``investissable_service`` internally
 re-calls ``shariah_service.screen_with_personal_thresholds`` for its
 own AAOIFI gate. We accept the redundancy in V1: the second call hits
-the 7-day Postgres cache that the first call seeds. A future refactor
-could thread the already-computed ShariahReport into Investissable to
-save one DB round-trip, but it's not the bottleneck.
+the 7-day Postgres cache that the first call seeds.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
+from typing import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import AsyncSessionLocal
 from app.integration.halal_terminal_client import HalalTerminalClient
 from app.integration.sec_edgar_client import SecEdgarClient
 from app.integration.yfinance_client import YFinanceClient
@@ -42,29 +56,53 @@ from app.services import (
 logger = logging.getLogger(__name__)
 
 
+# Type alias: a callable returning an async-context-manager that yields
+# an AsyncSession. ``AsyncSessionLocal`` matches this shape.
+SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+
+
 # ─── Public API ─────────────────────────────────────────────────────────────
 
 
 async def compute_synthesis(
     symbol: str,
-    db: AsyncSession,
     halal_client: HalalTerminalClient,
     sec_client: SecEdgarClient,
     yfinance_client: YFinanceClient,
+    *,
+    session_factory: SessionFactory | None = None,
 ) -> SynthesisReport:
-    """End-to-end synthesis pipeline. Always 200, never raises."""
-    sym = symbol.strip().upper()
+    """End-to-end synthesis pipeline. Always 200, never raises.
 
-    halal_co = shariah_service.screen_with_personal_thresholds(sym, db, halal_client)
-    inv_co = investissable_service.compute_investissable(sym, db, halal_client, sec_client)
-    val_co = valuation_service.compute_valuation(
-        sym, db, sec_client, yfinance_client=yfinance_client
-    )
+    Each of the 3 parallel branches acquires its own ``AsyncSession``
+    from ``session_factory`` so that concurrent ``db.execute`` calls
+    don't collide on a shared session (cf. module docstring).
+    """
+    sym = symbol.strip().upper()
+    factory: SessionFactory = session_factory or AsyncSessionLocal
+
+    async def _halal_branch() -> ShariahReport:
+        async with factory() as session:
+            return await shariah_service.screen_with_personal_thresholds(
+                sym, session, halal_client
+            )
+
+    async def _inv_branch() -> InvestissableReport:
+        async with factory() as session:
+            return await investissable_service.compute_investissable(
+                sym, session, halal_client, sec_client
+            )
+
+    async def _val_branch() -> ValuationReport:
+        async with factory() as session:
+            return await valuation_service.compute_valuation(
+                sym, session, sec_client, yfinance_client=yfinance_client
+            )
 
     halal_res, inv_res, val_res = await asyncio.gather(
-        _safe(halal_co, "shariah"),
-        _safe(inv_co, "investissable"),
-        _safe(val_co, "valuation"),
+        _safe(_halal_branch(), "shariah"),
+        _safe(_inv_branch(), "investissable"),
+        _safe(_val_branch(), "valuation"),
         return_exceptions=False,
     )
 

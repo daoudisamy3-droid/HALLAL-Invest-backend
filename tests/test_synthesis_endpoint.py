@@ -9,7 +9,6 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
-from app.api.v1.endpoints.synthesis import _db_session
 from app.core.config import settings
 from app.integration.halal_terminal_client import get_halal_terminal_client
 from app.integration.sec_edgar_client import get_sec_edgar_client
@@ -26,12 +25,13 @@ TEST_KEY = "test-uuid-key-0000"
 
 @pytest_asyncio.fixture()
 async def client(db, monkeypatch):
+    """ASGI client. NOTE: the synthesis endpoint no longer takes a ``db``
+    Depends (Step 7.1) — ``compute_synthesis`` opens its own session per
+    parallel branch. Since the 3 underlying services are monkey-patched
+    in each test, the sessions are opened-then-closed without real I/O.
+    """
     monkeypatch.setattr(settings, "FINTERMINAL_API_KEY", TEST_KEY)
 
-    async def _override_db():
-        yield db
-
-    app.dependency_overrides[_db_session] = _override_db
     app.dependency_overrides[get_halal_terminal_client] = lambda: AsyncMock()
     app.dependency_overrides[get_sec_edgar_client] = lambda: AsyncMock()
     app.dependency_overrides[get_yfinance_client] = lambda: AsyncMock()

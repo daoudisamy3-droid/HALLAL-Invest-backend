@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import date
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 import pytest
@@ -30,6 +30,20 @@ from app.schemas.investissable import InvestissableReport
 from app.schemas.shariah import ShariahReport
 from app.schemas.valuation import ValuationReport
 from app.services import synthesis_service as ss
+
+
+def _factory_yielding(session):
+    """Build a ``session_factory`` test helper that yields the test ``db`` fixture.
+
+    The real ``AsyncSessionLocal`` would connect to the prod URL on every
+    parallel branch — undesirable in tests where the 3 layers are
+    monkeypatched anyway. This factory just hands back the test session
+    inside an async context manager.
+    """
+    @asynccontextmanager
+    async def _cm():
+        yield session
+    return _cm
 
 
 # ─── Fixture builders ───────────────────────────────────────────────────────
@@ -104,7 +118,7 @@ async def test_all_green_yields_investable(db, monkeypatch) -> None:
         inv=_inv("OUI", "QUALITÉ EXCELLENTE"),
         val=_val("OUI", "SOUS-ÉVALUÉE"),
     )
-    out = await ss.compute_synthesis("AAPL", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     assert out.overall_verdict == "INVESTABLE"
     assert out.overall_label == "INVESTISSABLE — QUALITÉ EXCELLENTE — SOUS-ÉVALUÉE"
     assert out.errors == []
@@ -120,7 +134,7 @@ async def test_halal_fail_short_circuits_to_blocked(db, monkeypatch) -> None:
         inv=_inv("OUI"),
         val=_val("OUI"),
     )
-    out = await ss.compute_synthesis("AAPL", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     assert out.overall_verdict == "BLOCKED"
     assert "NON HALAL" in out.overall_label
     assert out.halal.verdict == "FAIL"
@@ -134,7 +148,7 @@ async def test_halal_error_triggers_requires_review(db, monkeypatch) -> None:
         inv=_inv("OUI"),
         val=_val("OUI"),
     )
-    out = await ss.compute_synthesis("AAPL", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     assert out.overall_verdict == "REQUIRES_REVIEW"
     assert any("Halal Terminal indisponible" in w for w in out.warnings)
 
@@ -147,7 +161,7 @@ async def test_halal_not_covered_triggers_requires_review(db, monkeypatch) -> No
         inv=_inv("OUI"),
         val=_val("OUI"),
     )
-    out = await ss.compute_synthesis("AAPL", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     assert out.overall_verdict == "REQUIRES_REVIEW"
     assert any("non couvert" in w for w in out.warnings)
 
@@ -160,7 +174,7 @@ async def test_investissable_non_yields_not_investable(db, monkeypatch) -> None:
         inv=_inv("NON", "QUALITÉ INSUFFISANTE"),
         val=_val("OUI"),
     )
-    out = await ss.compute_synthesis("AAPL", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     assert out.overall_verdict == "NOT_INVESTABLE"
     assert "NON INVESTISSABLE" in out.overall_label
     assert "QUALITÉ INSUFFISANTE" in out.overall_label
@@ -174,7 +188,7 @@ async def test_investissable_incertain_yields_requires_review(db, monkeypatch) -
         inv=_inv("INCERTAIN", None),
         val=_val("OUI"),
     )
-    out = await ss.compute_synthesis("AIXA.DE", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AIXA.DE", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     assert out.overall_verdict == "REQUIRES_REVIEW"
     assert any("INCERTAIN" in w for w in out.warnings)
 
@@ -188,7 +202,7 @@ async def test_valuation_non_yields_requires_review(db, monkeypatch) -> None:
         inv=_inv("OUI"),
         val=_val("NON", "SURÉVALUÉE"),
     )
-    out = await ss.compute_synthesis("AAPL", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     assert out.overall_verdict == "REQUIRES_REVIEW"
 
 
@@ -200,7 +214,7 @@ async def test_valuation_indetermine_yields_requires_review(db, monkeypatch) -> 
         inv=_inv("OUI"),
         val=_val("INDÉTERMINÉ", None),
     )
-    out = await ss.compute_synthesis("AAPL", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     assert out.overall_verdict == "REQUIRES_REVIEW"
     assert any("INDÉTERMINÉ" in w for w in out.warnings)
 
@@ -217,7 +231,7 @@ async def test_single_layer_exception_is_contained(db, monkeypatch) -> None:
         inv=_inv("OUI"),
         val=RuntimeError("yfinance down"),
     )
-    out = await ss.compute_synthesis("AAPL", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     assert out.overall_verdict == "REQUIRES_REVIEW"
     assert out.halal.available is True
     assert out.investissable.available is True
@@ -235,7 +249,7 @@ async def test_all_three_layers_raise_yields_requires_review_with_errors(db, mon
         inv=RuntimeError("sec edgar timeout"),
         val=RuntimeError("yfinance ip-blocked"),
     )
-    out = await ss.compute_synthesis("AAPL", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     assert out.overall_verdict == "REQUIRES_REVIEW"
     assert out.halal.available is False
     assert out.investissable.available is False
@@ -275,7 +289,7 @@ async def test_three_layers_run_in_parallel_not_sequentially(db, monkeypatch) ->
     )
 
     t0 = time.perf_counter()
-    out = await ss.compute_synthesis("AAPL", db, AsyncMock(), AsyncMock(), AsyncMock())
+    out = await ss.compute_synthesis("AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=_factory_yielding(db))
     elapsed = time.perf_counter() - t0
 
     assert out.overall_verdict == "INVESTABLE"
@@ -283,3 +297,64 @@ async def test_three_layers_run_in_parallel_not_sequentially(db, monkeypatch) ->
     assert elapsed < DELAY * 2.5, (
         f"layers ran sequentially: elapsed {elapsed:.2f}s, expected < {DELAY * 2.5:.2f}s"
     )
+
+
+# ─── Regression — Step 7.1 hotfix ───────────────────────────────────────────
+
+
+@pytest.mark.integration
+async def test_each_branch_gets_an_isolated_session(db, monkeypatch) -> None:
+    """Regression test for the Step-6 bug: when the 3 layers share a single
+    ``AsyncSession``, asyncpg raises ``InterfaceError: another operation in
+    progress`` on the slowest branch (valuation), surfacing as
+    ``valuation.available = False`` / ``verdict = "ERROR"`` in the bandeau
+    while the underlying valuation endpoint works perfectly.
+
+    Fix: each branch acquires its own session from ``session_factory``.
+    This test instruments each layer to read its session identity (via
+    ``id(session)``) — the 3 ids must be distinct.
+    """
+    seen_ids: list[int] = []
+
+    async def halal_co(_sym, session, *_a, **_kw):
+        seen_ids.append(id(session))
+        await asyncio.sleep(0.05)
+        return _halal("PASS")
+
+    async def inv_co(_sym, session, *_a, **_kw):
+        seen_ids.append(id(session))
+        await asyncio.sleep(0.05)
+        return _inv("OUI")
+
+    async def val_co(_sym, session, *_a, **_kw):
+        seen_ids.append(id(session))
+        await asyncio.sleep(0.05)
+        return _val("NON", "SURÉVALUÉE")
+
+    monkeypatch.setattr(ss.shariah_service, "screen_with_personal_thresholds", halal_co)
+    monkeypatch.setattr(ss.investissable_service, "compute_investissable", inv_co)
+    monkeypatch.setattr(ss.valuation_service, "compute_valuation", val_co)
+
+    # Factory returns a FRESH context manager every call (a new "session"
+    # would be a new asyncpg connection in production). Yield distinct
+    # sentinel objects so the 3 ids must differ.
+    counter = {"n": 0}
+
+    @asynccontextmanager
+    async def factory():
+        counter["n"] += 1
+        # Use a tagged proxy object so id() differs across calls.
+        proxy = type("S", (), {"tag": counter["n"], "db": db})()
+        yield proxy
+
+    out = await ss.compute_synthesis(
+        "AAPL", AsyncMock(), AsyncMock(), AsyncMock(), session_factory=factory,
+    )
+
+    assert len(seen_ids) == 3
+    assert len(set(seen_ids)) == 3, f"layers shared a session: {seen_ids}"
+    # And the bandeau still maps the real verdict — not "ERROR".
+    assert out.valuation.available is True
+    assert out.valuation.verdict == "NON"
+    assert out.valuation.label == "SURÉVALUÉE"
+    assert out.overall_verdict == "REQUIRES_REVIEW"
