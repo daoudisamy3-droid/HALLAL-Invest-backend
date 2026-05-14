@@ -257,16 +257,26 @@ def _extract_latest_annual(
     tags: list[str],
     unit: str,
 ) -> dict[str, Any] | None:
-    """Return the latest FY entry for any tag in ``tags`` under ``unit``.
+    """Return the latest FY entry across ALL tags in ``tags`` under ``unit``.
 
-    Walks the SEC payload at ``facts['facts']['us-gaap'][tag]['units'][unit]``.
-    Filters to ``fp == 'FY'``. Sorts by ``end`` desc, then ``filed`` desc to
-    pick the most recently restated value when multiple accession numbers
-    share the same period end.
+    Walks ``facts['facts']['us-gaap'][tag]['units'][unit]`` for every
+    tag in ``tags``, collects every ``fp == 'FY'`` entry, then picks the
+    most recent one (sort by ``end`` desc, then ``filed`` desc to break
+    ties on restatements sharing a period end).
+
+    Why iterate across *all* tags rather than short-circuiting on the
+    first tag that yields anything? US-GAAP concept naming evolved over
+    time. Apple, for example, stopped using ``Revenues`` around FY 2018
+    and migrated to ``RevenueFromContractWithCustomerExcludingAssessedTax``.
+    A first-tag-wins fallback would return the stale FY 2018 entry from
+    the legacy tag and never see the modern one. We instead let the
+    most-recent ``end`` date arbitrate.
     """
     us_gaap = facts.get("facts", {}).get("us-gaap", {})
     if not isinstance(us_gaap, dict):
         return None
+
+    pool: list[dict[str, Any]] = []
     for tag in tags:
         tag_data = us_gaap.get(tag)
         if not isinstance(tag_data, dict):
@@ -277,18 +287,18 @@ def _extract_latest_annual(
         entries = units.get(unit)
         if not isinstance(entries, list):
             continue
-        annual = [
-            e for e in entries
-            if isinstance(e, dict) and e.get("fp") == "FY" and e.get("end")
-        ]
-        if not annual:
-            continue
-        annual.sort(
-            key=lambda e: (str(e.get("end", "")), str(e.get("filed", ""))),
-            reverse=True,
-        )
-        return annual[0]
-    return None
+        for e in entries:
+            if isinstance(e, dict) and e.get("fp") == "FY" and e.get("end"):
+                pool.append(e)
+
+    if not pool:
+        return None
+
+    pool.sort(
+        key=lambda e: (str(e.get("end", "")), str(e.get("filed", ""))),
+        reverse=True,
+    )
+    return pool[0]
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -459,10 +469,16 @@ def extract_n_year_annuals(
     """Return up to ``n`` most recent FY entries for ``concept_name``.
 
     Returned list is sorted **most-recent-first**: ``[(period_end_y0, val_y0),
-    (period_end_y1, val_y1), …]``. Multi-tag fallback resolves to the first
-    tag that yields any FY entries; once a tag matches, only its entries
-    are used (no merging across tags). Restatements (same ``end`` across
-    multiple ``accn``) are de-duplicated to the latest ``filed`` value.
+    (period_end_y1, val_y1), …]``. We aggregate FY entries across **all**
+    concept tags listed in ``_CONCEPT_TAGS[concept_name]`` rather than
+    short-circuiting on the first tag that yields anything (Step 7.3.D
+    bug fix: Apple stopped using legacy ``Revenues`` ~FY 2018 and migrated
+    to ``RevenueFromContractWithCustomerExcludingAssessedTax`` — a
+    first-tag-wins fallback would silently return the stale FY 2018
+    series).
+
+    Restatements (same ``end`` across multiple ``accn`` or across tags)
+    are de-duplicated by keeping the entry with the latest ``filed``.
 
     Used by Piotroski (YoY criteria → need 2 years), Growth (CAGR 3y → 4
     years), Capital D1 (buybacks 3y → 3 years), Fraud Sig 1/2 (3 years).
@@ -473,6 +489,8 @@ def extract_n_year_annuals(
     us_gaap = facts.get("facts", {}).get("us-gaap", {})
     if not isinstance(us_gaap, dict):
         return []
+
+    pool: list[dict[str, Any]] = []
     for tag in _CONCEPT_TAGS[concept_name]:
         tag_data = us_gaap.get(tag)
         if not isinstance(tag_data, dict):
@@ -483,26 +501,27 @@ def extract_n_year_annuals(
         entries = units.get(unit)
         if not isinstance(entries, list):
             continue
-        annual = [
-            e for e in entries
-            if isinstance(e, dict) and e.get("fp") == "FY" and e.get("end")
-        ]
-        if not annual:
-            continue
-        # Group by end date, pick latest filed for each (handles restatements).
-        by_end: dict[str, dict[str, Any]] = {}
-        for e in annual:
-            end = str(e.get("end", ""))
-            prev = by_end.get(end)
-            if prev is None or str(e.get("filed", "")) > str(prev.get("filed", "")):
-                by_end[end] = e
-        # Sort by end date desc, take top n.
-        sorted_entries = sorted(by_end.values(), key=lambda e: str(e["end"]), reverse=True)
-        result: list[tuple[date, Decimal]] = []
-        for e in sorted_entries[:n]:
-            d = _to_date(e.get("end"))
-            v = _to_decimal(e.get("val"))
-            if d is not None and v is not None:
-                result.append((d, v))
-        return result
-    return []
+        for e in entries:
+            if isinstance(e, dict) and e.get("fp") == "FY" and e.get("end"):
+                pool.append(e)
+
+    if not pool:
+        return []
+
+    # Group by end date, pick latest filed for each (handles restatements
+    # and same-end overlaps between legacy + modern tags).
+    by_end: dict[str, dict[str, Any]] = {}
+    for e in pool:
+        end = str(e.get("end", ""))
+        prev = by_end.get(end)
+        if prev is None or str(e.get("filed", "")) > str(prev.get("filed", "")):
+            by_end[end] = e
+
+    sorted_entries = sorted(by_end.values(), key=lambda e: str(e["end"]), reverse=True)
+    result: list[tuple[date, Decimal]] = []
+    for e in sorted_entries[:n]:
+        d = _to_date(e.get("end"))
+        v = _to_decimal(e.get("val"))
+        if d is not None and v is not None:
+            result.append((d, v))
+    return result

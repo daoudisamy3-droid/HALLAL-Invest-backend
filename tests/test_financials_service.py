@@ -326,3 +326,131 @@ async def test_missing_concept_yields_none_not_zero(db) -> None:
     assert report.net_income is None
     assert report.total_assets is None
     assert report.eps_diluted is None
+
+
+# ─── Step 7.3.D — tag-aggregation regression tests ──────────────────────────
+
+
+def _xbrl(tag_to_entries: dict[str, list[dict[str, Any]]], unit: str = "USD") -> dict[str, Any]:
+    """Build a minimal companyfacts payload with multiple tags."""
+    return {
+        "entityName": "TestCo",
+        "facts": {
+            "us-gaap": {
+                tag: {"units": {unit: entries}}
+                for tag, entries in tag_to_entries.items()
+            }
+        },
+    }
+
+
+def _fy(end: str, val: int | float, *, filed: str | None = None) -> dict[str, Any]:
+    return {
+        "fp": "FY",
+        "end": end,
+        "filed": filed or end,
+        "val": val,
+        "fy": int(end[:4]),
+        "form": "10-K",
+        "accn": f"0000000000-{end[:4]}-000001",
+    }
+
+
+@pytest.mark.unit
+def test_extract_latest_annual_aggregates_across_tags() -> None:
+    """The legacy ``Revenues`` tag stops in 2018; the modern tag continues to 2024.
+
+    A first-tag-wins fallback would return the FY 2018 entry. The fixed
+    extractor aggregates FY entries from BOTH tags and picks 2024.
+    """
+    from app.services.financials_service import _extract_latest_annual
+
+    payload = _xbrl({
+        "Revenues": [
+            _fy("2016-12-31", 215639000000),
+            _fy("2017-12-31", 229234000000),
+            _fy("2018-12-31", 265595000000),  # last year of legacy tag
+        ],
+        "RevenueFromContractWithCustomerExcludingAssessedTax": [
+            _fy("2019-09-28", 260174000000),
+            _fy("2020-09-26", 274515000000),
+            _fy("2021-09-25", 365817000000),
+            _fy("2022-09-24", 394328000000),
+            _fy("2023-09-30", 383285000000),
+            _fy("2024-09-28", 391035000000),  # most recent
+        ],
+    })
+
+    entry = _extract_latest_annual(
+        payload,
+        ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax"],
+        "USD",
+    )
+    assert entry is not None
+    assert entry["end"] == "2024-09-28"
+    assert entry["fy"] == 2024
+    assert entry["val"] == 391035000000
+
+
+@pytest.mark.unit
+def test_extract_latest_annual_handles_modern_tag_only() -> None:
+    """Sanity: when only the modern tag has data, we still find it."""
+    from app.services.financials_service import _extract_latest_annual
+    payload = _xbrl({
+        "RevenueFromContractWithCustomerExcludingAssessedTax": [
+            _fy("2024-09-28", 100),
+        ],
+    })
+    entry = _extract_latest_annual(
+        payload,
+        ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax"],
+        "USD",
+    )
+    assert entry is not None and entry["val"] == 100
+
+
+@pytest.mark.unit
+def test_extract_n_year_annuals_aggregates_across_tags() -> None:
+    """Same bug, same fix: ``extract_n_year_annuals`` must merge FY entries
+    from every tag — otherwise step-4 scores (Piotroski / Growth / etc.)
+    silently drop years that migrated to a modern tag."""
+    from app.services.financials_service import extract_n_year_annuals
+
+    payload = _xbrl({
+        "Revenues": [
+            _fy("2018-12-31", 265),
+        ],
+        "RevenueFromContractWithCustomerExcludingAssessedTax": [
+            _fy("2022-09-24", 394),
+            _fy("2023-09-30", 383),
+            _fy("2024-09-28", 391),
+        ],
+    })
+
+    series = extract_n_year_annuals(payload, "revenues", n=5)
+    # Most-recent-first, mixing both tags: 2024, 2023, 2022, 2018
+    ends = [d.isoformat() for d, _v in series]
+    assert ends == ["2024-09-28", "2023-09-30", "2022-09-24", "2018-12-31"]
+    vals = [v for _d, v in series]
+    assert vals[0] == Decimal("391")  # latest is from the modern tag
+    assert vals[-1] == Decimal("265")  # oldest is from the legacy tag
+
+
+@pytest.mark.unit
+def test_extract_n_year_annuals_dedupes_overlapping_end_dates() -> None:
+    """When legacy + modern tags both report the same end date, keep the
+    entry with the later ``filed`` (treat as restatement)."""
+    from app.services.financials_service import extract_n_year_annuals
+
+    payload = _xbrl({
+        "Revenues": [
+            _fy("2018-12-31", 100, filed="2019-01-01"),
+        ],
+        "RevenueFromContractWithCustomerExcludingAssessedTax": [
+            _fy("2018-12-31", 110, filed="2020-06-15"),  # restatement, wins
+        ],
+    })
+
+    series = extract_n_year_annuals(payload, "revenues", n=5)
+    assert len(series) == 1
+    assert series[0][1] == Decimal("110")
