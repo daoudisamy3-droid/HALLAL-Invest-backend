@@ -18,7 +18,7 @@ from sqlalchemy import select
 
 from app.core.exceptions import SECEdgarError
 from app.models.financials_cache import FinancialsCache
-from app.services.financials_service import get_financials
+from app.services.financials_service import _CONCEPT_TAGS, get_financials
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -454,3 +454,219 @@ def test_extract_n_year_annuals_dedupes_overlapping_end_dates() -> None:
     series = extract_n_year_annuals(payload, "revenues", n=5)
     assert len(series) == 1
     assert series[0][1] == Decimal("110")
+
+
+# ─── Step 8 Phase A — universal coverage regression tests ───────────────────
+
+
+def _xbrl_multi(
+    taxonomies: dict[str, dict[str, list[dict[str, Any]]]],
+    unit: str = "USD",
+) -> dict[str, Any]:
+    """Build a multi-taxonomy companyfacts payload.
+
+    ``taxonomies`` shape:  ``{taxonomy: {tag: [entry, ...]}, ...}``
+    """
+    return {
+        "entityName": "TestCo",
+        "facts": {
+            tax: {
+                tag: {"units": {unit: entries}}
+                for tag, entries in tags.items()
+            }
+            for tax, tags in taxonomies.items()
+        },
+    }
+
+
+def _foreign_annual(
+    end: str,
+    val: int | float,
+    *,
+    form: str = "20-F",
+    start: str | None = None,
+    filed: str | None = None,
+) -> dict[str, Any]:
+    """Build an annual entry shaped like a foreign filer would emit it:
+    NO ``fp`` field, but a ``form`` in {20-F, 40-F} and ~12-month period.
+    """
+    if start is None:
+        # default: 365 days before end
+        from datetime import date as _d, timedelta as _t
+        start = (_d.fromisoformat(end) - _t(days=365)).isoformat()
+    return {
+        "end": end,
+        "start": start,
+        "filed": filed or end,
+        "val": val,
+        "fy": int(end[:4]),
+        "form": form,
+        "accn": f"0000000000-{end[:4]}-000001",
+    }
+
+
+@pytest.mark.unit
+def test_extract_latest_annual_accepts_20F_foreign_filing() -> None:
+    """A 20-F foreign filer reports under ifrs-full taxonomy with no fp=FY
+    marker. The extractor must still recognise the entry as annual based
+    on form + period duration."""
+    from app.services.financials_service import _extract_latest_annual
+    payload = _xbrl_multi({
+        "ifrs-full": {
+            "Revenue": [
+                _foreign_annual("2024-12-31", 1_500_000_000, form="20-F",
+                                start="2024-01-01"),
+            ],
+        },
+    })
+    entry = _extract_latest_annual(payload, _CONCEPT_TAGS["revenues"], "USD")
+    assert entry is not None
+    assert entry["val"] == 1_500_000_000
+    assert entry["form"] == "20-F"
+
+
+@pytest.mark.unit
+def test_extract_latest_annual_accepts_40F_canadian_filing() -> None:
+    from app.services.financials_service import _extract_latest_annual
+    payload = _xbrl_multi({
+        "ifrs-full": {
+            "ProfitLoss": [
+                _foreign_annual("2024-12-31", 200_000_000, form="40-F",
+                                start="2024-01-01"),
+            ],
+        },
+    })
+    entry = _extract_latest_annual(payload, _CONCEPT_TAGS["net_income"], "USD")
+    assert entry is not None
+    assert entry["val"] == 200_000_000
+
+
+@pytest.mark.unit
+def test_extract_latest_annual_rejects_quarterly_form() -> None:
+    """A 10-Q filing with the same shape must NOT be picked up as annual."""
+    from app.services.financials_service import _extract_latest_annual
+    quarterly = {
+        "end": "2024-06-30",
+        "start": "2024-04-01",   # ~90 days, not annual
+        "filed": "2024-07-15",
+        "val": 100,
+        "fy": 2024,
+        "fp": "Q2",
+        "form": "10-Q",
+        "accn": "0000000000-24-000002",
+    }
+    payload = _xbrl_multi({"us-gaap": {"Revenues": [quarterly]}})
+    entry = _extract_latest_annual(payload, ["Revenues"], "USD")
+    assert entry is None
+
+
+@pytest.mark.unit
+def test_extract_latest_annual_prefers_most_recent_across_taxonomies() -> None:
+    """Mixed taxonomies (rare but possible for dual-listed companies):
+    pick the most recent end date regardless of which taxonomy hosts it."""
+    from app.services.financials_service import _extract_latest_annual
+    payload = _xbrl_multi({
+        "us-gaap": {
+            "Revenues": [_fy("2022-12-31", 100)],
+        },
+        "ifrs-full": {
+            "Revenue": [_foreign_annual("2024-12-31", 200, form="20-F",
+                                        start="2024-01-01")],
+        },
+    })
+    entry = _extract_latest_annual(payload, _CONCEPT_TAGS["revenues"], "USD")
+    assert entry is not None
+    assert entry["val"] == 200
+    assert entry["end"] == "2024-12-31"
+
+
+@pytest.mark.unit
+def test_extract_latest_annual_uses_expanded_gaap_tag_for_banks() -> None:
+    """Bank-like filers use InterestAndDividendIncomeOperating instead of
+    Revenues. Step 8 added it to the revenue tag list."""
+    from app.services.financials_service import _extract_latest_annual
+    # Build a "bank" payload: only the interest-income-operating tag.
+    payload = _xbrl_multi({
+        "us-gaap": {
+            "InterestAndDividendIncomeOperating": [_fy("2024-12-31", 50_000_000)],
+        },
+    })
+    # NOT in revenues list — but it IS in interest_income_operating list.
+    entry = _extract_latest_annual(
+        payload, _CONCEPT_TAGS["interest_income_operating"], "USD"
+    )
+    assert entry is not None
+    assert entry["val"] == 50_000_000
+
+
+@pytest.mark.unit
+def test_extract_n_year_annuals_walks_both_taxonomies() -> None:
+    from app.services.financials_service import extract_n_year_annuals
+    payload = _xbrl_multi({
+        "us-gaap": {
+            "Revenues": [_fy("2022-12-31", 100)],
+        },
+        "ifrs-full": {
+            "Revenue": [
+                _foreign_annual("2023-12-31", 200, form="20-F", start="2023-01-01"),
+                _foreign_annual("2024-12-31", 250, form="20-F", start="2024-01-01"),
+            ],
+        },
+    })
+    series = extract_n_year_annuals(payload, "revenues", n=5)
+    ends = [d.isoformat() for d, _ in series]
+    assert ends == ["2024-12-31", "2023-12-31", "2022-12-31"]
+
+
+@pytest.mark.unit
+def test_is_annual_entry_helper_boundary_cases() -> None:
+    """320..400 day windows are accepted; outside the window is rejected."""
+    from app.services.financials_service import _is_annual_entry
+    # Exactly 365 days, 20-F → accepted
+    assert _is_annual_entry({
+        "end": "2024-12-31", "start": "2024-01-01", "form": "20-F",
+    })
+    # 365 days, 10-K (no fp) → accepted via form whitelist
+    assert _is_annual_entry({
+        "end": "2024-12-31", "start": "2024-01-01", "form": "10-K",
+    })
+    # 90 days, 10-Q → rejected
+    assert not _is_annual_entry({
+        "end": "2024-06-30", "start": "2024-04-01", "form": "10-Q",
+    })
+    # No end → rejected
+    assert not _is_annual_entry({"start": "2024-01-01", "form": "10-K"})
+    # fp=FY without start (US 10-K shape often omits start for instantaneous
+    # tags like Assets) → accepted on fp alone
+    assert _is_annual_entry({"end": "2024-12-31", "fp": "FY"})
+
+
+# ─── Step 8 Phase A — EXEMPT_SIC must NOT short-circuit the pipeline ────────
+
+
+@pytest.mark.unit
+def test_exempt_sic_only_affects_fraud_signal_1_not_pipeline() -> None:
+    """A capital-intensive ticker (SIC 1311 = Oil & Gas) is exempt from the
+    absolute FCF/NI threshold (Fraud Signal 1) but must still receive
+    Piotroski / Growth / Capital scores as usual."""
+    from app.services.sector import classify_from_submissions
+
+    submissions = {"sicCode": "1311", "sicDescription": "Crude Petroleum and Natural Gas"}
+    sector = classify_from_submissions(submissions)
+    assert sector.is_exempt_from_absolute_fcf_ni is True
+
+    # Now confirm: nothing in the codebase calls a "early return" based on
+    # is_exempt_from_absolute_fcf_ni outside of fraud._signal_1_fcf_ni.
+    # Use grep at test time as a guard.
+    import pathlib
+    src_root = pathlib.Path(__file__).parent.parent / "app"
+    callers: list[str] = []
+    for path in src_root.rglob("*.py"):
+        if path.name == "fraud.py" or path.name == "sector.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "is_exempt_from_absolute_fcf_ni" in text:
+            callers.append(str(path.relative_to(src_root)))
+    assert callers == [], (
+        f"EXEMPT_SIC short-circuit detected outside fraud/sector: {callers}"
+    )

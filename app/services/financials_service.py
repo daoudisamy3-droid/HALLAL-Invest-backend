@@ -41,55 +41,147 @@ from app.schemas.financials import FinancialsSnapshot
 logger = logging.getLogger(__name__)
 
 
-# ─── Concept-tag fallback map (Q4 plan validated) ────────────────────────────
+# ─── Concept-tag fallback map (Step 8 Phase A — universal coverage) ─────────
 
 
-# Each financial concept maps to an ordered list of US-GAAP tags to try.
-# The first tag that yields at least one FY (annual) entry wins.
+# Each financial concept maps to an ordered list of XBRL tags to try. We
+# aggregate FY entries across **all** listed tags (Step 7.3.D), and across
+# **all** supported taxonomies (Step 8 Phase A: us-gaap for domestic US
+# filers + ifrs-full for foreign filers using 20-F / 40-F).
 #
-# Step 2 published 11 concepts (the ones below up to ``stockholders_equity``);
-# Step 4 added the next 10 to support Altman Z'', Piotroski F-Score, Fraud
-# signals, Growth, and Capital allocation. These extra concepts are NOT
-# surfaced in the public ``FinancialsSnapshot`` schema (which stays
-# backwards-compatible); they are consumed internally by
-# ``app/services/investissable_service.py`` via ``get_facts_payload``.
+# Coverage rationale (Phase A):
+#   - Tag list is intentionally permissive. SEC EDGAR ingests dozens of
+#     synonymous concepts depending on industry (Revenue vs Revenues vs
+#     SalesRevenueNet vs ContractRevenue vs InterestAndDividendIncomeOperating
+#     for banks), and the modern revenue tag splits into the
+#     "ExcludingAssessedTax" vs "IncludingAssessedTax" variants since 2018.
+#   - For each concept, we list both US-GAAP and IFRS-full variants. The
+#     extractor walks all taxonomies + all tags, pools the FY entries, and
+#     picks the most recent.
+#
+# Naming convention used inside the lists: ``"taxonomy:Tag"`` when the tag
+# is taxonomy-specific (e.g. ``"ifrs-full:Revenue"``). Bare tag names default
+# to US-GAAP.
 _CONCEPT_TAGS: dict[str, list[str]] = {
-    # ── Step 2 (11 concepts exposed in FinancialsSnapshot) ───────────────────
+    # ── Revenues ─────────────────────────────────────────────────────────────
     "revenues": [
+        # US-GAAP modern + legacy variants
         "Revenues",
         "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
         "SalesRevenueNet",
+        "SalesRevenueGoodsNet",
+        "SalesRevenueServicesNet",
+        "Revenue",
+        # IFRS variant for 20-F / 40-F filers
+        "ifrs-full:Revenue",
     ],
-    "net_income": ["NetIncomeLoss"],
-    "total_assets": ["Assets"],
-    "long_term_debt": ["LongTermDebt", "LongTermDebtNoncurrent"],
-    "short_term_borrowings": ["ShortTermBorrowings", "DebtCurrent"],
-    "cash_and_equivalents": ["CashAndCashEquivalentsAtCarryingValue", "Cash"],
-    "interest_income_operating": ["InterestIncomeOperating"],
-    "eps_diluted": ["EarningsPerShareDiluted"],
-    "operating_cash_flow": ["NetCashProvidedByUsedInOperatingActivities"],
-    "capex": ["PaymentsToAcquirePropertyPlantAndEquipment"],
-    "stockholders_equity": ["StockholdersEquity"],
-    # ── Step 4 (10 additional concepts, internal only) ───────────────────────
-    "retained_earnings": ["RetainedEarningsAccumulatedDeficit"],
-    "total_liabilities": ["Liabilities"],
-    "current_assets": ["AssetsCurrent"],
-    "current_liabilities": ["LiabilitiesCurrent"],
+    "net_income": [
+        "NetIncomeLoss",
+        "ProfitLoss",
+        "ifrs-full:ProfitLoss",
+        "ifrs-full:ProfitLossAttributableToOwnersOfParent",
+    ],
+    "total_assets": [
+        "Assets",
+        "ifrs-full:Assets",
+    ],
+    "long_term_debt": [
+        "LongTermDebt",
+        "LongTermDebtNoncurrent",
+        "LongTermDebtAndCapitalLeaseObligations",
+        "LongTermBorrowings",
+        "ifrs-full:LongtermBorrowings",
+        "ifrs-full:NoncurrentBorrowings",
+    ],
+    "short_term_borrowings": [
+        "ShortTermBorrowings",
+        "DebtCurrent",
+        "ShortTermBankLoansAndNotesPayable",
+        "ifrs-full:CurrentBorrowings",
+        "ifrs-full:ShorttermBorrowings",
+    ],
+    "cash_and_equivalents": [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "Cash",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+        "ifrs-full:CashAndCashEquivalents",
+    ],
+    "interest_income_operating": [
+        "InterestIncomeOperating",
+        "InterestAndDividendIncomeOperating",
+    ],
+    "eps_diluted": [
+        "EarningsPerShareDiluted",
+        "IncomeLossFromContinuingOperationsPerDilutedShare",
+        "ifrs-full:DilutedEarningsLossPerShare",
+    ],
+    "operating_cash_flow": [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+        "ifrs-full:CashFlowsFromUsedInOperatingActivities",
+    ],
+    "capex": [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
+        "PaymentsForCapitalImprovements",
+        "ifrs-full:PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities",
+    ],
+    "stockholders_equity": [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        "ifrs-full:Equity",
+        "ifrs-full:EquityAttributableToOwnersOfParent",
+    ],
+    # ── Step 4 internal concepts (universal coverage extension) ──────────────
+    "retained_earnings": [
+        "RetainedEarningsAccumulatedDeficit",
+        "ifrs-full:RetainedEarnings",
+    ],
+    "total_liabilities": [
+        "Liabilities",
+        "ifrs-full:Liabilities",
+    ],
+    "current_assets": [
+        "AssetsCurrent",
+        "ifrs-full:CurrentAssets",
+    ],
+    "current_liabilities": [
+        "LiabilitiesCurrent",
+        "ifrs-full:CurrentLiabilities",
+    ],
     "operating_income": [
         "OperatingIncomeLoss",
         "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+        "ifrs-full:ProfitLossFromOperatingActivities",
     ],
-    "gross_profit": ["GrossProfit"],
+    "gross_profit": [
+        "GrossProfit",
+        "ifrs-full:GrossProfit",
+    ],
     "receivables": [
         "AccountsReceivableNetCurrent",
         "ReceivablesNetCurrent",
+        "AccountsAndOtherReceivablesNetCurrent",
+        "ifrs-full:CurrentTradeReceivables",
     ],
     "shares_outstanding": [
         "CommonStockSharesOutstanding",
         "EntityCommonStockSharesOutstanding",
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+        "ifrs-full:NumberOfSharesOutstanding",
     ],
-    "buybacks": ["PaymentsForRepurchaseOfCommonStock"],
-    "r_and_d": ["ResearchAndDevelopmentExpense"],
+    "buybacks": [
+        "PaymentsForRepurchaseOfCommonStock",
+        "PaymentsForRepurchaseOfEquity",
+        "ifrs-full:PaymentsForSharesIssued",
+    ],
+    "r_and_d": [
+        "ResearchAndDevelopmentExpense",
+        "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
+        "ifrs-full:ResearchAndDevelopmentExpense",
+    ],
 }
 
 # Most concepts are USD; EPS is reported as USD/shares, shares as a count.
@@ -252,48 +344,123 @@ def _build_snapshot_from_facts(
     )
 
 
+# ─── Annual entry detection (Step 8 Phase A — universal coverage) ───────────
+
+
+# Foreign filers (20-F, 40-F) report on SEC EDGAR but their entries don't
+# always carry ``fp="FY"``. We accept any entry whose form is in the
+# annual-form whitelist AND whose period covers ~12 months (start→end).
+# Both US domestic 10-K filings and foreign 20-F / 40-F annual reports are
+# normalised to the same "annual entry" abstraction.
+_ANNUAL_FORMS: frozenset[str] = frozenset({
+    "10-K", "10-K/A", "10-KSB", "10-KSB/A",      # US domestic
+    "20-F", "20-F/A",                              # foreign private issuers
+    "40-F", "40-F/A",                              # Canadian filers (MJDS)
+})
+
+_ANNUAL_TAXONOMIES: tuple[str, ...] = ("us-gaap", "ifrs-full")
+
+# Annual period tolerance: between 320 and 400 days (covers 52-week fiscal
+# years + leap-year drift + reporting-week quirks).
+_ANNUAL_MIN_DAYS: int = 320
+_ANNUAL_MAX_DAYS: int = 400
+
+
+def _is_annual_entry(e: dict[str, Any]) -> bool:
+    """Permissive detection: US 10-K via ``fp == 'FY'`` OR foreign 20-F/40-F
+    via form match + ~12 month period.
+
+    Why both paths? SEC EDGAR's ``fp`` field is reliable for US domestic
+    filings but is sometimes ``null`` or quarterly-coded for foreign
+    private issuers even on annual filings. Using ``end - start`` duration
+    as a fallback heuristic gives us robust annual detection across both
+    cohorts.
+    """
+    if not isinstance(e, dict) or not e.get("end"):
+        return False
+    if e.get("fp") == "FY":
+        return True
+    form = e.get("form")
+    if isinstance(form, str) and form in _ANNUAL_FORMS:
+        # Validate period duration: must be ~1 year.
+        start = e.get("start")
+        end = e.get("end")
+        if isinstance(start, str) and isinstance(end, str):
+            try:
+                d_start = date.fromisoformat(start)
+                d_end = date.fromisoformat(end)
+                delta_days = (d_end - d_start).days
+                if _ANNUAL_MIN_DAYS <= delta_days <= _ANNUAL_MAX_DAYS:
+                    return True
+            except ValueError:
+                pass
+    return False
+
+
+def _walk_concept_entries(
+    facts: dict[str, Any], tag_specs: list[str], unit: str
+) -> list[dict[str, Any]]:
+    """Pool entries for every (taxonomy, tag) combination listed in
+    ``tag_specs``, filtering to annual entries only.
+
+    A ``tag_specs`` element may be either:
+      - ``"Tag"`` → search under all taxonomies in :data:`_ANNUAL_TAXONOMIES`
+      - ``"taxonomy:Tag"`` → search under that specific taxonomy only
+
+    Returns a flat list of XBRL entry dicts. Duplicates across taxonomies
+    are tolerated and resolved by the caller (latest ``filed`` wins).
+    """
+    facts_root = facts.get("facts")
+    if not isinstance(facts_root, dict):
+        return []
+
+    pool: list[dict[str, Any]] = []
+    for spec in tag_specs:
+        if ":" in spec:
+            taxonomy, tag = spec.split(":", 1)
+            taxonomies: tuple[str, ...] = (taxonomy,)
+        else:
+            tag = spec
+            taxonomies = _ANNUAL_TAXONOMIES
+
+        for taxonomy in taxonomies:
+            tax_data = facts_root.get(taxonomy)
+            if not isinstance(tax_data, dict):
+                continue
+            tag_data = tax_data.get(tag)
+            if not isinstance(tag_data, dict):
+                continue
+            units = tag_data.get("units", {})
+            if not isinstance(units, dict):
+                continue
+            entries = units.get(unit)
+            if not isinstance(entries, list):
+                continue
+            for e in entries:
+                if _is_annual_entry(e):
+                    pool.append(e)
+    return pool
+
+
 def _extract_latest_annual(
     facts: dict[str, Any],
     tags: list[str],
     unit: str,
 ) -> dict[str, Any] | None:
-    """Return the latest FY entry across ALL tags in ``tags`` under ``unit``.
+    """Return the latest annual entry across ALL tags + taxonomies.
 
-    Walks ``facts['facts']['us-gaap'][tag]['units'][unit]`` for every
-    tag in ``tags``, collects every ``fp == 'FY'`` entry, then picks the
-    most recent one (sort by ``end`` desc, then ``filed`` desc to break
-    ties on restatements sharing a period end).
+    Step 8 Phase A: walks both ``us-gaap`` and ``ifrs-full`` taxonomies
+    so foreign filers (20-F / 40-F using IFRS) are covered without code
+    forks. Uses :func:`_is_annual_entry` for permissive annual detection
+    (US ``fp="FY"`` OR foreign annual-form + ~12 month period).
 
-    Why iterate across *all* tags rather than short-circuiting on the
-    first tag that yields anything? US-GAAP concept naming evolved over
-    time. Apple, for example, stopped using ``Revenues`` around FY 2018
-    and migrated to ``RevenueFromContractWithCustomerExcludingAssessedTax``.
-    A first-tag-wins fallback would return the stale FY 2018 entry from
-    the legacy tag and never see the modern one. We instead let the
-    most-recent ``end`` date arbitrate.
+    Restatements (same ``end`` across multiple ``filed``) are resolved by
+    sort: ``end`` desc, ``filed`` desc. Step 7.3.D fix preserved
+    (aggregation across tags before picking the latest).
     """
-    us_gaap = facts.get("facts", {}).get("us-gaap", {})
-    if not isinstance(us_gaap, dict):
-        return None
-
-    pool: list[dict[str, Any]] = []
-    for tag in tags:
-        tag_data = us_gaap.get(tag)
-        if not isinstance(tag_data, dict):
-            continue
-        units = tag_data.get("units", {})
-        if not isinstance(units, dict):
-            continue
-        entries = units.get(unit)
-        if not isinstance(entries, list):
-            continue
-        for e in entries:
-            if isinstance(e, dict) and e.get("fp") == "FY" and e.get("end"):
-                pool.append(e)
-
+    pool = _walk_concept_entries(facts, tags, unit)
     if not pool:
         return None
-
     pool.sort(
         key=lambda e: (str(e.get("end", "")), str(e.get("filed", ""))),
         reverse=True,
@@ -486,25 +653,8 @@ def extract_n_year_annuals(
     if concept_name not in _CONCEPT_TAGS:
         raise KeyError(f"unknown concept_name: {concept_name}")
     unit = _CONCEPT_UNITS.get(concept_name, "USD")
-    us_gaap = facts.get("facts", {}).get("us-gaap", {})
-    if not isinstance(us_gaap, dict):
-        return []
 
-    pool: list[dict[str, Any]] = []
-    for tag in _CONCEPT_TAGS[concept_name]:
-        tag_data = us_gaap.get(tag)
-        if not isinstance(tag_data, dict):
-            continue
-        units = tag_data.get("units", {})
-        if not isinstance(units, dict):
-            continue
-        entries = units.get(unit)
-        if not isinstance(entries, list):
-            continue
-        for e in entries:
-            if isinstance(e, dict) and e.get("fp") == "FY" and e.get("end"):
-                pool.append(e)
-
+    pool = _walk_concept_entries(facts, _CONCEPT_TAGS[concept_name], unit)
     if not pool:
         return []
 
